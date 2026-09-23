@@ -120,17 +120,31 @@ class HatefulMemes(Dataset):
         )
 
 
+def split_file(root, split, use_captions=True):
+    """The captioned split if `scripts/captions.py` has run, else the plain one.
+
+    Without this the captioning script writes `<split>_captioned.jsonl` and
+    nothing ever reads it: the loader would go on opening `<split>.jsonl`, the
+    caption column would be absent, and an expensive BLIP pass would silently
+    make no difference to the model.
+    """
+    captioned = Path(root) / f"{split}_captioned.jsonl"
+    if use_captions and captioned.exists():
+        return captioned
+    return Path(root) / f"{split}.jsonl"
+
+
 def build_loaders(config, tokenizer, image_processor, limit=None):
     """Train and validation loaders, plus the positive weight."""
     root = Path(config.data_dir)
     train = HatefulMemes(
-        root / "train.jsonl", root, tokenizer, image_processor,
-        config.max_text_length, train=True,
+        split_file(root, "train", config.use_captions), root, tokenizer,
+        image_processor, config.max_text_length, train=True,
         use_captions=config.use_captions, limit=limit,
     )
     validation = HatefulMemes(
-        root / "dev.jsonl", root, tokenizer, image_processor,
-        config.max_text_length, train=False,
+        split_file(root, "dev", config.use_captions), root, tokenizer,
+        image_processor, config.max_text_length, train=False,
         use_captions=config.use_captions, limit=limit,
     )
 

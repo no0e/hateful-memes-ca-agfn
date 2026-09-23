@@ -149,3 +149,23 @@ def test_clipping_a_nan_norm_poisons_every_gradient():
         "the bias gradient was finite and untouched by the NaN, and clipping "
         "spread it anyway"
     )
+
+
+def test_the_loader_prefers_the_captioned_split(tmp_path):
+    """captions.py writes <split>_captioned.jsonl. If the loader does not look
+    for it, an expensive BLIP pass changes nothing and nothing says so."""
+    from ca_agfn.data import split_file
+
+    (tmp_path / "train.jsonl").write_text("{}", encoding="utf-8")
+    assert split_file(tmp_path, "train").name == "train.jsonl"
+
+    (tmp_path / "train_captioned.jsonl").write_text("{}", encoding="utf-8")
+    assert split_file(tmp_path, "train").name == "train_captioned.jsonl"
+
+
+def test_captions_can_be_turned_off(tmp_path):
+    from ca_agfn.data import split_file
+
+    (tmp_path / "dev.jsonl").write_text("{}", encoding="utf-8")
+    (tmp_path / "dev_captioned.jsonl").write_text("{}", encoding="utf-8")
+    assert split_file(tmp_path, "dev", use_captions=False).name == "dev.jsonl"
