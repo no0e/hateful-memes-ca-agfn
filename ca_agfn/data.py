@@ -18,15 +18,28 @@ import pandas as pd
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
 
-# Light augmentation only. The text inside a meme is part of the signal, and
-# aggressive cropping or rotation destroys the thing the model has to read.
-TRAIN_TRANSFORM = transforms.Compose([
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
-    transforms.RandomRotation(degrees=5),
-])
+_TRANSFORM = None
+
+
+def train_transform():
+    """Light augmentation, built on first use.
+
+    Imported lazily so this module can be loaded for its path logic without
+    pulling torchvision in. Light on purpose: the text inside a meme is part of
+    the signal, and aggressive cropping or rotation destroys the thing the
+    model has to read.
+    """
+    global _TRANSFORM
+    if _TRANSFORM is None:
+        from torchvision import transforms
+
+        _TRANSFORM = transforms.Compose([
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+            transforms.RandomRotation(degrees=5),
+        ])
+    return _TRANSFORM
 
 
 class HatefulMemes(Dataset):
@@ -88,7 +101,7 @@ class HatefulMemes(Dataset):
             image = Image.new("RGB", (224, 224))
 
         if self.train:
-            image = TRAIN_TRANSFORM(image)
+            image = train_transform()(image)
 
         pixels = self.image_processor(images=image, return_tensors="pt")
         return {
