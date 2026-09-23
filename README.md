@@ -84,6 +84,97 @@ optimiser.step()
 `skipped_steps` is recorded every epoch and printed at the end, because a guard
 that silently eats half the batches is its own kind of failure.
 
+## Results
+
+<p align="center">
+  <img src="docs/results.png" width="100%" alt="Four panels: the gate plotted against the attention entropy that is supposed to drive it, the validation ROC curve, where the gate settles for hateful and benign memes, and three real memes shown as the text and caption the model reads">
+</p>
+
+| | |
+|---|---|
+| Phase 1, backbones frozen | AUROC 0.6424 |
+| Phase 2, top two blocks open | **AUROC 0.6741** |
+| Accuracy | 0.6080 |
+| Macro F1 | 0.5936 |
+| Steps dropped as non-finite | **0** |
+
+Validation split, 500 memes. Twenty-five epochs before early stopping, about
+forty minutes on one NVIDIA A2.
+
+**Phase 2 completes.** The version this grew from died four lines into it, on
+ten consecutive non-finite losses. Nothing diverged here, and the guard counted
+zero dropped steps, so the divergence was the configuration rather than
+something the guard had to catch: XLM-RoBERTa in place of DeBERTa-v3, and only
+the top two blocks opened.
+
+**0.674 is a modest number and worth putting in context.** On this benchmark,
+published text-only baselines sit around 0.65 to 0.69, late fusion around 0.70,
+ViLBERT around 0.71 to 0.73, and humans at 0.85. This model is at the level of
+a unimodal baseline, not above it. Two blocks unfrozen, twenty-five epochs and
+encoders with no joint pretraining is most of the explanation.
+
+## The entropy gate does not work
+
+The architecture claims that the entropy of the text's attention decides how
+much the text is trusted. That claim is testable, so the first panel of the
+figure tests it, over all 500 validation memes.
+
+**The correlation is r = +0.036.** No relationship, and the wrong sign: the
+design says diffuse text should shift weight *to* the image, which would be
+negative.
+
+The reason is visible in the worked example below. The entropy sits at 0.99 for
+every input, which is the maximum. The cross-modal attention never learns to
+concentrate on anything, and nothing in the loss asks it to. A quantity that
+does not vary cannot drive a gate; entering a linear layer, it only shifts a
+bias.
+
+This was measured twice, on two formulations. The first took the entropy of the
+head-averaged attention, which is flat by construction, since entropy is
+concave and eight sharp heads pointing in different directions average to
+something near-uniform. `tests/test_model.py` builds exactly that case and
+measures 0.00 per head against 0.99 averaged. Fixing it to take the entropy per
+head and average afterwards is the right computation and changed nothing:
+r went from +0.047 to +0.036, AUROC from 0.6744 to 0.6741.
+
+So the gate is implemented, and it carries no signal. Making it work is not a
+matter of tuning: it needs a term in the loss that penalises uniform attention,
+or supervision on the attention itself.
+
+The rest of the model is unaffected. The clash feature and the fusion do
+respond to the image, which the example below shows directly.
+
+## A worked example
+
+<p align="center">
+  <img src="docs/example.jpg" width="100%" alt="The same caption over Mount St Helens before and during the 1980 eruption, with the model's entropy, gate and probability under each">
+</p>
+
+The same line of text over two images. Against the calm mountain it is literal;
+against the eruption it says the opposite. That is the structure the benchmark
+is built on: for most hateful memes there exists a benign one with the same
+text over a different picture, so neither modality alone separates the pair.
+
+| | entropy | gate | P(hateful) |
+|---|---|---|---|
+| The mountain, before | 0.987 | 0.294 | 0.030 |
+| The same mountain, erupting | 0.994 | 0.301 | **0.073** |
+
+The text is identical byte for byte, so every difference comes from the image.
+`P(hateful)` more than doubles while the gate moves by 0.007. The model reads
+the image; it just does not read it through the gate.
+
+Both photographs are public domain, from the United States Geological Survey,
+with their provenance in `docs/example/PROVENANCE.md`. **No image from the
+benchmark is reproduced here**: its licence forbids hosting or distributing the
+dataset to third parties, with no exception for attribution, and it is built
+around hateful content besides. The example is constructed; the numbers are
+what the trained model returned.
+
+```bash
+python scripts/example.py --text "your caption here"
+```
+
 ## Quick start
 
 ```bash
@@ -91,7 +182,7 @@ git clone https://github.com/no0e/hateful-memes-ca-agfn.git
 cd hateful-memes-ca-agfn
 pip install -r requirements.txt
 
-pytest tests/ -q                  # 11 tests, no dataset and no GPU needed
+pytest tests/ -q                  # 16 tests, no dataset and no GPU needed
 python scripts/train.py --smoke   # 64 samples, one epoch per phase
 ```
 
@@ -148,7 +239,7 @@ ca_agfn/
   model.py       cross-modal attention, semantic clash, the entropy gate
   training.py    two-phase training, EMA, and the gradient guard
 scripts/         fetch_data, captions, train
-tests/           11 tests, CPU only, seconds to run
+tests/           16 tests, CPU only, seconds to run
 ```
 
 ## Requirements

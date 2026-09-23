@@ -1,0 +1,17 @@
+{
+  "text": "everything is under control",
+  "device": "NVIDIA A2",
+  "note": "Written by scripts/example.py on the GPU run of the per-head entropy model, AUROC 0.6741. Kept so the figure can be redrawn without the 1.4 GB checkpoint.",
+  "panels": {
+    "The mountain, before": {
+      "probability": 0.030,
+      "gate": 0.294,
+      "entropy": 0.987
+    },
+    "The same mountain, erupting": {
+      "probability": 0.073,
+      "gate": 0.301,
+      "entropy": 0.994
+    }
+  }
+}
