@@ -3,15 +3,22 @@
     python scripts/fetch_data.py
 
 The dataset is not redistributable, so this downloads it rather than shipping
-it. It needs credentials, which is the one step this script cannot do for you:
-put a Kaggle API token at ~/.kaggle/kaggle.json (Kaggle, Settings, API, Create
-New Token) and run it again. The alternative source is Meta's own release at
-hatefulmemes.org, which requires agreeing to their research licence.
+it. It needs credentials, which is the one step this script cannot do for you.
+Either works:
+
+    ~/.kaggle/kaggle.json        the classic file, with a username and a key
+    KAGGLE_API_TOKEN=KGAT_...    the newer prefixed token, in the environment
+
+Kaggle now issues the second kind from Settings, API, Create New Token, and a
+token of that shape in a file called anything else is not picked up by
+kagglehub. The alternative source is Meta's own release at hatefulmemes.org,
+which requires agreeing to their research licence.
 
 What lands in data/: train.jsonl, dev.jsonl, test.jsonl and an img/ directory of
 about 3.4 GB.
 """
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
