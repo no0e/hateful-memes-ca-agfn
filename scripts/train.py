@@ -38,6 +38,12 @@ def main():
     parser.add_argument("--data", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--phase2-epochs", type=int, default=None,
+                        help="Phase 2 was still improving at epoch 10 on the "
+                             "first full run, so it is worth raising.")
+    parser.add_argument("--patience", type=int, default=None)
+    parser.add_argument("--unfreeze", type=int, default=None,
+                        help="How many top blocks of each backbone to open.")
     parser.add_argument("--smoke", action="store_true",
                         help="64 samples and one epoch per phase.")
     parser.add_argument("--out", default=str(ROOT / "docs"))
@@ -48,6 +54,12 @@ def main():
         config.data_dir = Path(args.data)
     if args.batch_size:
         config.batch_size = args.batch_size
+    if args.phase2_epochs:
+        config.phase2_epochs = args.phase2_epochs
+    if args.patience:
+        config.patience = args.patience
+    if args.unfreeze:
+        config.unfreeze_top = args.unfreeze
     limit = 64 if args.smoke else None
     if args.smoke:
         config.phase1_epochs = 1
