@@ -53,16 +53,20 @@ def main():
             "again."
         )
 
-    token = Path.home() / ".kaggle" / "kaggle.json"
-    if not token.exists():
+    credentials = Path.home() / ".kaggle" / "kaggle.json"
+    if not credentials.exists() and not os.environ.get("KAGGLE_API_TOKEN"):
         raise SystemExit(
-            f"No Kaggle token at {token}.\n\n"
-            "On Kaggle: Settings, API, Create New Token. That downloads a\n"
-            "kaggle.json. Then:\n\n"
+            f"No Kaggle credentials: neither {credentials} nor a\n"
+            "KAGGLE_API_TOKEN in the environment.\n\n"
+            "On Kaggle: Settings, API, Create New Token. If that hands you a\n"
+            "kaggle.json:\n\n"
             "    mkdir -p ~/.kaggle && mv kaggle.json ~/.kaggle/\n"
             "    chmod 600 ~/.kaggle/kaggle.json\n\n"
-            "This script never reads or transmits the token itself; the\n"
-            "Kaggle client does."
+            "If it hands you a token beginning KGAT_, export it instead:\n\n"
+            "    export KAGGLE_API_TOKEN='KGAT_...'\n\n"
+            "A KGAT_ token written to a file is not read by kagglehub; it has\n"
+            "to be in the environment. This script never reads or transmits\n"
+            "either credential itself, the Kaggle client does."
         )
 
     print(f"Downloading {DATASET} ...")
