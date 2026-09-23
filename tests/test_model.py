@@ -169,3 +169,44 @@ def test_captions_can_be_turned_off(tmp_path):
     (tmp_path / "dev.jsonl").write_text("{}", encoding="utf-8")
     (tmp_path / "dev_captioned.jsonl").write_text("{}", encoding="utf-8")
     assert split_file(tmp_path, "dev", use_captions=False).name == "dev.jsonl"
+
+
+def test_entropy_is_taken_per_head_not_after_averaging():
+    """The bug that made the gate a constant.
+
+    Eight heads, each certain about a different patch. Every head has zero
+    entropy. Their average is close to uniform, and measuring that gives an
+    entropy close to one, which on real data pinned the gate input at 0.99 for
+    every meme. Entropy is concave, so the order of the two operations is not
+    a detail.
+    """
+    heads, patches = 8, 8
+    per_head = torch.zeros(1, heads, 4, patches)
+    for head in range(heads):
+        per_head[:, head, :, head] = 1.0  # each head is certain, elsewhere
+
+    sharp = AdaptiveGatedFusion.attention_entropy(per_head)
+    assert sharp.item() < 0.01, "every head is a spike, so the entropy is zero"
+
+    averaged_first = AdaptiveGatedFusion.attention_entropy(
+        per_head.mean(dim=1))
+    assert averaged_first.item() > 0.99, "averaging first destroys the signal"
+
+
+def test_entropy_accepts_both_shapes():
+    """(batch, tokens, patches) and (batch, heads, tokens, patches)."""
+    flat3 = torch.full((2, 5, 8), 1 / 8)
+    flat4 = torch.full((2, 4, 5, 8), 1 / 8)
+    assert AdaptiveGatedFusion.attention_entropy(flat3).shape == (2, 1)
+    assert AdaptiveGatedFusion.attention_entropy(flat4).shape == (2, 1)
+    assert torch.allclose(
+        AdaptiveGatedFusion.attention_entropy(flat3),
+        AdaptiveGatedFusion.attention_entropy(flat4), atol=1e-5)
+
+
+def test_cross_modal_attention_returns_per_head_weights():
+    attention = CrossModalAttention(HIDDEN, n_heads=4).eval()
+    _, _, weights = attention(
+        torch.randn(2, 6, HIDDEN), torch.randn(2, 5, HIDDEN),
+        torch.ones(2, 6, dtype=torch.long))
+    assert weights.shape == (2, 4, 6, 5), "batch, heads, text tokens, patches"

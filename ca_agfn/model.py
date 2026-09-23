@@ -52,8 +52,15 @@ class CrossModalAttention(nn.Module):
             padding = padding.clone()
             padding[padding.all(dim=1), 0] = False
 
+        # Per head, not averaged across them. The default averages the eight
+        # heads together before returning, and the mean of several sharp
+        # distributions peaked in different places is a flat one: the entropy
+        # of a mixture is never below the mean of its components' entropies.
+        # Measured on the validation split, the averaged weights put the
+        # entropy at 0.99 for every single meme, which is a constant, and a
+        # constant cannot drive a gate.
         attended_text, weights = self.text_to_vision(
-            query=text, key=vision, value=vision)
+            query=text, key=vision, value=vision, average_attn_weights=False)
         text_out = self.norm_text(text + attended_text)
 
         attended_vision, _ = self.vision_to_text(
@@ -103,18 +110,24 @@ class AdaptiveGatedFusion(nn.Module):
 
     @staticmethod
     def attention_entropy(weights):
-        """Normalised entropy of each token's attention over the image.
+        """Normalised entropy of the text's attention over the image.
 
         High means the text is looking everywhere, which is the same as looking
         nowhere. Low means it is pointing at something.
 
+        Accepts (batch, tokens, patches) or (batch, heads, tokens, patches).
+        With heads, the entropy is taken per head and then averaged, never the
+        other way round: entropy is concave, so the entropy of the averaged
+        distribution is at least the average of the entropies, and usually far
+        above it. Eight sharp heads pointing at eight different patches average
+        to something almost uniform, and measuring that gives 0.99 for every
+        input. Averaging the entropies keeps the sharpness each head actually
+        has.
+
         The weights are renormalised first. `nn.MultiheadAttention` applies
         dropout to the attention probabilities in training mode, so what comes
-        back sums to somewhere near 0.9 rather than to 1, and an entropy taken
-        over that is being read off a distribution that is not one. Without this
-        the gate would mean a different thing in training than at evaluation,
-        which is the kind of gap that shows up only as a model that will not
-        reproduce.
+        back sums to somewhere near 0.9 rather than to 1. Without this the gate
+        would mean a different thing in training than at evaluation.
 
         Dividing by log(n) puts the result in [0, 1] and keeps it comparable
         across image encoders with different patch counts.
@@ -122,10 +135,13 @@ class AdaptiveGatedFusion(nn.Module):
         weights = weights.clamp_min(0)
         weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(EPSILON)
 
-        per_token = -(weights * torch.log(weights + EPSILON)).sum(dim=-1)
+        per_position = -(weights * torch.log(weights + EPSILON)).sum(dim=-1)
         ceiling = torch.log(torch.tensor(
             float(weights.size(-1)), device=weights.device)).clamp_min(EPSILON)
-        return (per_token / ceiling).mean(dim=-1, keepdim=True)
+        normalised = per_position / ceiling
+
+        # Average over every axis but the batch: tokens, and heads if present.
+        return normalised.flatten(start_dim=1).mean(dim=1, keepdim=True)
 
     def forward(self, text_cls, vision_cls, clash, entropy):
         text_weight = torch.sigmoid(
