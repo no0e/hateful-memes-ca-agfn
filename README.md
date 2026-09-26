@@ -18,37 +18,9 @@ in a concatenation, and then decides how much to trust each side.
 
 ## The architecture
 
-```mermaid
-flowchart LR
-    TX[/"meme text"/]
-    IM[/"meme image"/]
-
-    subgraph ENC["«backbones» frozen in phase 1, top 2 blocks opened in phase 2"]
-        direction TB
-        XLM["XLM-RoBERTa base<br/>768-d, 128 tokens"]
-        CLIP["CLIP-ViT-B/32<br/>50 patches, projected to 768-d"]
-    end
-
-    subgraph FUSE["«fusion» CA-AGFN"]
-        direction TB
-        CMA["CrossModalAttention<br/>each modality reads the other, 8 heads"]
-        CLASH["SemanticClash<br/>&#124;t−v&#124; concat t·v, projected"]
-        ENT["attention entropy<br/>per head, then ÷ log n_patches"]
-        GATE["AdaptiveGatedFusion<br/>α = λ·α_text + (1−λ)·(1−α_vision)<br/>fused = α·t + (1−α)·v"]
-        CMA -- "pooled t, v" --> CLASH
-        CMA -- "per-head weights" --> ENT
-        CLASH --> GATE
-        ENT --> GATE
-    end
-
-    TX --> XLM
-    IM --> CLIP
-    XLM --> CMA
-    CLIP --> CMA
-    CMA -- "pooled t, v" --> GATE
-    GATE --> CLS["dropout → Linear → one logit"]
-    CLS --> P(["P(hateful)"])
-```
+<p align="center">
+  <img src="docs/pipeline.svg" width="100%" alt="Text and image encoded by XLM-RoBERTa and CLIP, joined by cross-modal attention, which feeds a semantic clash vector, an attention-entropy measure and the pooled representations into an adaptive gated fusion, then a linear layer to P(hateful)">
+</p>
 
 The entropy path is the part that is mine, and the one the results section
 reports as not working.
