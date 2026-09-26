@@ -58,39 +58,6 @@ that is being read off something that is not a distribution.
 Backbones are XLM-RoBERTa and CLIP-ViT-B/32. Memes carry multilingual and
 transliterated text, which is what XLM-R is for.
 
-## The bug this repository exists to fix
-
-An earlier version of this work trained phase one to an AUROC of 0.611 and then
-died four lines into phase two, on ten consecutive non-finite losses. The
-diagnosis is worth writing down, because the bug was in the safety net.
-
-That loop checked whether the **loss** was finite and skipped the step if it was
-not. At the first step of phase two the loss was finite. The backward pass
-through the newly unfrozen backbone produced non-finite **gradients**.
-`clip_grad_norm_` computed a total norm of NaN, divided every gradient by it,
-and so turned all of them into NaN. The optimiser wrote those into the weights.
-From the next step onward every forward pass returned NaN, the loss check fired
-on all of them, and the run aborted ten steps later having lost the model at
-step zero.
-
-The fix is one check in the right place: gradients are tested for finiteness
-after the backward pass and before the clip. `tests/test_model.py` demonstrates
-the mechanism rather than asserting it, by clipping a set of gradients where
-exactly one entry is NaN and showing that an untouched, finite gradient
-elsewhere in the model comes back non-finite.
-
-```python
-if not gradients_are_finite(model):
-    skipped += 1
-    optimiser.zero_grad(set_to_none=True)
-    continue
-torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-optimiser.step()
-```
-
-`skipped_steps` is recorded every epoch and printed at the end, because a guard
-that silently eats half the batches is its own kind of failure.
-
 ## Results
 
 <p align="center">
@@ -236,6 +203,29 @@ final layer norms stay frozen throughout.
 
 Both phases validate on EMA weights, keep the best checkpoint by AUROC, and stop
 early when it stops improving.
+
+**Gradients are checked for finiteness after the backward pass and before the
+clip**, which is the one placement that works. `clip_grad_norm_` computes a
+single total norm across every parameter and divides them all by it, so one
+non-finite entry anywhere turns every other gradient into NaN, including the
+ones that were fine. Watching the loss instead is too late: the loss at that
+step is still finite, and by the time a forward pass returns NaN the optimiser
+has already written it into the weights.
+
+```python
+if not gradients_are_finite(model):
+    skipped += 1
+    optimiser.zero_grad(set_to_none=True)
+    continue
+torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+optimiser.step()
+```
+
+`skipped_steps` is counted every epoch and printed at the end, because a guard
+that quietly eats half the batches is its own kind of failure. The run reported
+zero. `tests/test_model.py` demonstrates the mechanism rather than asserting
+it, by clipping a set of gradients where exactly one entry is NaN and showing
+that an untouched, finite gradient elsewhere comes back non-finite.
 
 ## Layout
 

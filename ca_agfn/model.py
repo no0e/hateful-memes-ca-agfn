@@ -194,8 +194,9 @@ class CAAGFN(nn.Module):
         """Open the top `n_layers` transformer blocks of each backbone.
 
         Only blocks. Embeddings, relative-position tables and the final layer
-        norms stay frozen: unfreezing those is what made the earlier version of
-        this model diverge on the first optimiser step of phase two.
+        norms stay frozen: opening those sends a large gradient into the parts
+        of a pretrained encoder least able to absorb it, and phase two then
+        diverges on its first optimiser step.
         """
         for name, parameter in self.text_encoder.named_parameters():
             parameter.requires_grad = self._in_top_block(

@@ -27,7 +27,6 @@ import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 from transformers import AutoTokenizer, CLIPImageProcessor  # noqa: E402

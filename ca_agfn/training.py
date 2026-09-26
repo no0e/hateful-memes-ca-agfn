@@ -1,23 +1,20 @@
 """Two-phase training, and the guard that makes phase two survive.
 
-The earlier version of this project trained phase one to an AUROC of 0.611 and
-then died four lines into phase two, on ten consecutive non-finite losses. The
-diagnosis is worth writing down, because the bug was in the safety net rather
-than in the model.
+Phase two opens the top blocks of two pretrained backbones, which is where a
+non-finite gradient is most likely to turn up. The guard for it has to sit
+between the backward pass and the clip.
 
-That loop checked whether the **loss** was finite and skipped the step if it was
-not. At the first step of phase two the loss was finite. The backward pass
-through the newly unfrozen backbone produced non-finite **gradients**.
-`clip_grad_norm_` computed a total norm of NaN, divided by it, and wrote NaN
-into every gradient in the model. The optimiser then wrote those NaNs into the
-weights. From the next step onward every forward pass returned NaN, the loss
-check fired on all of them, and the run aborted ten steps later having already
-lost the model.
+Watching the loss instead does not work. `clip_grad_norm_` computes one total
+norm across every parameter and scales them all by it, so a single non-finite
+entry anywhere makes that norm non-finite and turns every other gradient into
+NaN, including the ones that were fine. The optimiser writes those into the
+weights, and only the *next* forward pass returns a non-finite loss. By then
+the model is already gone.
 
-The fix is one check in the right place: gradients are tested for finiteness
-after the backward pass and before the clip. A bad batch is dropped and the
-weights are never touched. `skipped_steps` counts how often that happens,
-because a guard that silently eats half the batches is its own kind of failure.
+So gradients are tested for finiteness after backward and before the clip. A
+bad batch is dropped and the weights are never touched. `skipped_steps` counts
+how often that happens, because a guard that silently eats half the batches is
+its own kind of failure.
 """
 import copy
 import math
@@ -77,9 +74,9 @@ class ExponentialMovingAverage:
 def gradients_are_finite(model):
     """True when every gradient in the model is finite.
 
-    This is the check the previous version was missing. It has to run after
-    `backward` and before `clip_grad_norm_`, because clipping a set of
-    gradients whose norm is NaN turns all of them into NaN.
+    It has to run after `backward` and before `clip_grad_norm_`: clipping a
+    set of gradients whose total norm is NaN turns every one of them into NaN,
+    so after the clip there is nothing left to detect.
     """
     for parameter in model.parameters():
         if parameter.grad is not None and not torch.isfinite(parameter.grad).all():

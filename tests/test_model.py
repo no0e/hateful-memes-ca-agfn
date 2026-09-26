@@ -1,10 +1,9 @@
-"""Tests for the parts that failed silently in the notebook this grew from.
+"""Tests for the parts that go wrong without raising anything.
 
 None of these need the dataset or a GPU. They run in seconds on a CPU against
 tiny random tensors, which is the point: the failures they pin are the ones
-that cost a full training run to discover.
+that otherwise cost a full training run to find.
 """
-import pytest
 import torch
 
 from ca_agfn.model import AdaptiveGatedFusion, CrossModalAttention, SemanticClash
@@ -130,7 +129,7 @@ def test_gradient_guard_sees_an_inf():
 
 
 def test_clipping_a_nan_norm_poisons_every_gradient():
-    """The mechanism of the original failure, demonstrated rather than claimed.
+    """Why the guard runs before the clip, demonstrated rather than asserted.
 
     One non-finite gradient, passed to clip_grad_norm_, makes the total norm
     non-finite and scales every other gradient by it. This is why the guard has
@@ -172,13 +171,12 @@ def test_captions_can_be_turned_off(tmp_path):
 
 
 def test_entropy_is_taken_per_head_not_after_averaging():
-    """The bug that made the gate a constant.
+    """The order of the two operations is what keeps the gate from being flat.
 
     Eight heads, each certain about a different patch. Every head has zero
     entropy. Their average is close to uniform, and measuring that gives an
-    entropy close to one, which on real data pinned the gate input at 0.99 for
-    every meme. Entropy is concave, so the order of the two operations is not
-    a detail.
+    entropy close to one — on real data it pins the gate input at 0.99 for
+    every meme. Entropy is concave, so averaging first is not a detail.
     """
     heads, patches = 8, 8
     per_head = torch.zeros(1, heads, 4, patches)

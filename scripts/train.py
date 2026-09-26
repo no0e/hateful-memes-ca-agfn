@@ -95,7 +95,7 @@ def main():
         config.checkpoint_dir)
 
     # Phase 2: open the top blocks only. Embeddings and position tables stay
-    # frozen; unfreezing those is what made the earlier version diverge.
+    # frozen; opening those makes phase two diverge on its first step.
     model.unfreeze_top(config.unfreeze_top)
     history, phase2_path, phase2_auroc = train_phase(
         model, train_loader, val_loader, config, 2, pos_weight, device,
