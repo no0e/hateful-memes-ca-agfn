@@ -16,6 +16,10 @@ and ignores the other cannot separate those pairs even in principle.
 So this model builds the gap explicitly rather than hoping a classifier finds it
 in a concatenation, and then decides how much to trust each side.
 
+This started as a course assignment scored on Kaggle. The version here is a
+rewrite, built to run end to end on public infrastructure rather than the code
+that was originally submitted.
+
 ## The architecture
 
 <p align="center">
@@ -117,6 +121,26 @@ or supervision on the attention itself.
 
 The rest of the model is unaffected. The clash feature and the fusion do
 respond to the image, which the example below shows directly.
+
+## The model has no way to look anything up
+
+A meme often only makes sense with context a caption cannot carry: a specific
+face, a flag, a symbol, a meme template being quoted. This architecture has no
+way to supply that. XLM-RoBERTa and CLIP-ViT-B/32 answer from whatever their
+pretraining happened to encode implicitly, and that encoding cannot be queried,
+checked, or updated. There is no external knowledge base here, no entity
+lookup, nothing comparable to retrieval-augmented generation. A reference the
+encoders never saw enough of during pretraining is a reference this model
+cannot recognise, however clear it would be to a person.
+
+CLIP-ViT-B/32 makes this sharper than a larger encoder would: its patches are
+32 pixels wide, coarse enough to lose a small logo or a partial face outright.
+Whether that specifically cost accuracy was never isolated in this project; the
+gap to the stronger published baselines, discussed above, has other causes too,
+and nothing here separates their contributions. A retrieval step ahead of the
+encoders, looking up who or what an image contains before the model reads it,
+is a plausible way to close part of that gap and is not something attempted
+here.
 
 ## A worked example
 
