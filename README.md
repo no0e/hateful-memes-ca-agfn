@@ -202,6 +202,24 @@ extracted, labelled hateful or not, about 36% positive. It is not
 redistributable, so `scripts/fetch_data.py` downloads it and this repository
 ships none of it.
 
+Introduced in the Hateful Memes Challenge:
+
+> Kiela, D., Firooz, H., Mohan, A., Goswami, V., Singh, A., Ringshia, P., and
+> Testuggine, D. (2020). The Hateful Memes Challenge: Detecting Hate Speech in
+> Multimodal Memes. *Advances in Neural Information Processing Systems (NeurIPS)*,
+> 33. [arXiv:2005.04790](https://arxiv.org/abs/2005.04790)
+
+```bibtex
+@inproceedings{kiela2020hateful,
+  title     = {The Hateful Memes Challenge: Detecting Hate Speech in Multimodal Memes},
+  author    = {Kiela, Douwe and Firooz, Hamed and Mohan, Aravind and Goswami, Vedanuj
+               and Singh, Amanpreet and Ringshia, Pratik and Testuggine, Davide},
+  booktitle = {Advances in Neural Information Processing Systems},
+  volume    = {33},
+  year      = {2020}
+}
+```
+
 It needs a Kaggle API token at `~/.kaggle/kaggle.json`, or Meta's own release at
 hatefulmemes.org under their research licence. The script tells you which step
 is missing and never handles the token itself.
