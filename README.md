@@ -155,12 +155,14 @@ text over a different picture, so neither modality alone separates the pair.
 
 | | entropy | gate | P(hateful) |
 |---|---|---|---|
-| The mountain, before | 0.987 | 0.294 | 0.030 |
-| The same mountain, erupting | 0.994 | 0.301 | **0.073** |
+| The mountain, before | 0.989 | 0.335 | 0.099 |
+| The same mountain, erupting | 0.994 | 0.296 | **0.184** |
 
 The text is identical byte for byte, so every difference comes from the image.
-`P(hateful)` more than doubles while the gate moves by 0.007. The model reads
-the image; it just does not read it through the gate.
+`P(hateful)` nearly doubles while the gate moves by 0.039, which is too little
+to read a direction into from two examples; the correlation over the full
+500-meme validation set, above, is what actually answers that, and it is close
+to zero. The model reads the image; it just does not read it through the gate.
 
 Both photographs are public domain, from the United States Geological Survey,
 with their provenance in `docs/example/PROVENANCE.md`. **No image from the

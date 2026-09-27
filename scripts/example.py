@@ -34,7 +34,7 @@ from transformers import AutoTokenizer, CLIPImageProcessor  # noqa: E402
 from ca_agfn.config import Config  # noqa: E402
 from ca_agfn.model import CAAGFN  # noqa: E402
 
-CAPTION = "everything is under control"
+CAPTION = "no need to panic"
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
 INK_MUTED = "#898781"
