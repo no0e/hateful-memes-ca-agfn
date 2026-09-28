@@ -14,16 +14,14 @@ and the training script picks the captioned files up automatically if they are
 there.
 """
 import argparse
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+import pandas as pd
+import torch
+from PIL import Image
+from transformers import BlipForConditionalGeneration, BlipProcessor
 
-import pandas as pd  # noqa: E402
-import torch  # noqa: E402
-from PIL import Image  # noqa: E402
-from transformers import BlipForConditionalGeneration, BlipProcessor  # noqa: E402
+from ca_agfn.config import ROOT
 
 MODEL = "Salesforce/blip-image-captioning-base"
 
@@ -51,10 +49,11 @@ def caption_file(source, image_root, destination, processor, model, device,
 
         produced = [""] * len(chunk)
         if images:
-            inputs = processor(images=images, return_tensors="pt").to(device)
+            inputs = processor(images=images, return_tensors="pt").to(
+                device, model.dtype)
             with torch.no_grad():
                 output = model.generate(**inputs, max_new_tokens=30)
-            for position, sequence in zip(keep, output):
+            for position, sequence in zip(keep, output, strict=True):
                 produced[position] = processor.decode(
                     sequence, skip_special_tokens=True)
         captions.extend(produced)
@@ -80,9 +79,11 @@ def main():
     print(f"Captioning with {MODEL} on {device}")
 
     processor = BlipProcessor.from_pretrained(MODEL)
-    model = BlipForConditionalGeneration.from_pretrained(
-        MODEL, torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-    ).to(device).eval()
+    model = BlipForConditionalGeneration.from_pretrained(MODEL).to(device).eval()
+    if device == "cuda":
+        # Half precision after loading: the loading keyword for it was renamed
+        # between transformers 4 and 5.
+        model = model.half()
 
     for split in ("train", "dev"):
         source = root / f"{split}.jsonl"

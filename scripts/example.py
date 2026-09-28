@@ -1,12 +1,12 @@
 """Run the trained model on a constructed meme, and draw the result.
 
-    python scripts/example.py --data ~/work/memes-data
+    python scripts/example.py --checkpoint checkpoints/full_seed0.safetensors
+    python scripts/example.py --scores docs/example/scores.json   # no GPU
 
 The same line of text over two different images. On the calm mountain it reads
 literally; over the same mountain erupting it reads as its opposite. That is
-the structure the whole benchmark is built on, and the structure this
-architecture exists to catch: neither the text alone nor the image alone
-distinguishes the two, only the relationship between them does.
+the structure the whole benchmark is built on: neither the text alone nor the
+image alone distinguishes the two, only the relationship between them does.
 
 Both photographs are public domain, from the United States Geological Survey,
 and their provenance is in docs/example/PROVENANCE.md. They are not from the
@@ -17,22 +17,16 @@ returns for these two inputs.
 """
 import argparse
 import json
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-import matplotlib  # noqa: E402
+import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import torch  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
-from transformers import AutoTokenizer, CLIPImageProcessor  # noqa: E402
 
-from ca_agfn.config import Config  # noqa: E402
-from ca_agfn.model import CAAGFN  # noqa: E402
+from ca_agfn.config import ROOT  # noqa: E402
 
 CAPTION = "no need to panic"
 SURFACE = "#fcfcfb"
@@ -95,16 +89,17 @@ def meme(path, text, width=520, height=520):
 
 
 @torch.no_grad()
-def score(model, tokenizer, processor, image, text, device, max_length=128):
+def score(model, tokenizer, processor, image, text, device):
+    length = min(model.config.max_text_length, tokenizer.model_max_length)
     encoded = tokenizer([text], padding="max_length", truncation=True,
-                        max_length=max_length, return_tensors="pt")
+                        max_length=length, return_tensors="pt")
     pixels = processor(images=image, return_tensors="pt")
 
     logits, extra = model(
         encoded["input_ids"].to(device),
         encoded["attention_mask"].to(device),
         pixels["pixel_values"].to(device),
-        return_gate=True,
+        return_details=True,
     )
     return {
         "probability": float(torch.sigmoid(logits.float())[0]),
@@ -115,21 +110,20 @@ def score(model, tokenizer, processor, image, text, device, max_length=128):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", default=None)
-    parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--checkpoint", default=str(
+        ROOT / "checkpoints" / "full_seed0.safetensors"))
     parser.add_argument("--device", default=None)
     parser.add_argument("--text", default=CAPTION)
     parser.add_argument("--scores", default=None,
                         help="Render from a scores file instead of loading the "
-                             "model. The file is written by a normal run; this "
-                             "redraws the figure on a machine that has the "
-                             "photographs but not the 1.4 GB checkpoint.")
+                             "model. A run with the model writes it to "
+                             "--write-scores; this redraws the figure on a "
+                             "machine without the checkpoint or a GPU.")
+    parser.add_argument("--write-scores", default=str(
+        ROOT / "docs" / "example" / "scores.json"))
     parser.add_argument("--out", default=str(ROOT / "docs" / "example.jpg"))
     args = parser.parse_args()
 
-    config = Config()
-    if args.data:
-        config.data_dir = Path(args.data)
     device = torch.device(
         args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
@@ -139,21 +133,20 @@ def main():
         print(f"Rendering from {args.scores}, measured on "
               f"{cached.get('device', 'an unrecorded device')}.\n")
     else:
-        checkpoint = Path(
-            args.checkpoint or (config.checkpoint_dir / "phase2_best.pt"))
+        from transformers import AutoTokenizer, CLIPImageProcessor
+
+        from ca_agfn.checkpoint import load_checkpoint
+
+        checkpoint = Path(args.checkpoint)
         if not checkpoint.exists():
             raise SystemExit(
-                f"No checkpoint at {checkpoint}. Run scripts/train.py first, "
-                "or pass --scores to redraw from a previous run."
+                f"No checkpoint at {checkpoint}. Run scripts/train.py with "
+                "--checkpoint first, or pass --scores to redraw from a "
+                "previous run."
             )
-
-        tokenizer = AutoTokenizer.from_pretrained(config.text_model)
-        processor = CLIPImageProcessor.from_pretrained(config.vision_model)
-        model = CAAGFN(config)
-        model.load_state_dict(
-            torch.load(checkpoint, map_location=device,
-                       weights_only=False)["state_dict"])
-        model.to(device).eval()
+        model, _ = load_checkpoint(checkpoint, device)
+        tokenizer = AutoTokenizer.from_pretrained(model.config.text_model)
+        processor = CLIPImageProcessor.from_pretrained(model.config.vision_model)
 
     source = ROOT / "docs" / "example"
     panels = [
@@ -168,7 +161,7 @@ def main():
     figure, axes = plt.subplots(1, 2, figsize=(11, 6.8))
 
     results = []
-    for ax, (title, path) in zip(axes, panels):
+    for ax, (title, path) in zip(axes, panels, strict=True):
         composed = meme(path, args.text)
         measured = (cached["panels"][title] if cached else
                     score(model, tokenizer, processor, composed, args.text,
@@ -208,6 +201,22 @@ def main():
         print(f"  {title:<32} entropy {measured['entropy']:.3f}  "
               f"gate {measured['gate']:.3f}  "
               f"P(hateful) {measured['probability']:.3f}")
+
+    if cached is None:
+        record = {
+            "text": args.text,
+            "device": str(torch.cuda.get_device_name(0) if device.type == "cuda"
+                          else "cpu"),
+            "checkpoint": Path(args.checkpoint).name,
+            "note": "Written by scripts/example.py, so the figure can be "
+                    "redrawn with --scores and no checkpoint.",
+            "panels": {title: {key: round(value, 4)
+                               for key, value in measured.items()}
+                       for title, measured in results},
+        }
+        Path(args.write_scores).write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        print(f"\nWrote {args.write_scores}")
 
     difference = abs(results[0][1]["gate"] - results[1][1]["gate"])
     print(

@@ -20,11 +20,9 @@ about 3.4 GB.
 import argparse
 import os
 import shutil
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+from ca_agfn.config import ROOT
 
 DATASET = "parthplc/facebook-hateful-meme-dataset"
 EXPECTED = ("train.jsonl", "dev.jsonl")
@@ -49,9 +47,9 @@ def main():
         import kagglehub
     except ImportError:
         raise SystemExit(
-            "kagglehub is not installed. pip install kagglehub, then run this "
-            "again."
-        )
+            "kagglehub is not installed. pip install -e '.[data]', then run "
+            "this again."
+        ) from None
 
     credentials = Path.home() / ".kaggle" / "kaggle.json"
     if not credentials.exists() and not os.environ.get("KAGGLE_API_TOKEN"):

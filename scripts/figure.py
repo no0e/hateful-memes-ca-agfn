@@ -1,40 +1,27 @@
-"""Draw the results figure from a trained checkpoint.
+"""Draw the results figure from the result files, with no model and no GPU.
 
-    python scripts/figure.py --data ~/work/memes-data
+    python scripts/figure.py
 
-Four panels, and the first one is the point: the architecture claims that the
-entropy of the text's attention decides how much the text is trusted, so that
-claim is plotted against the gate the model actually produced on every
-validation meme. An architecture diagram would show what was intended. This
-shows what happened.
+Four panels. The ablations, each a mean over seeds with the seeds shown. The
+shuffle test: what happens to the AUROC when each text is paired with another
+meme's image, or each image with another meme's text. The entropy gate's claim,
+measured on every test meme. The ROC curve of the full model, one line per
+seed.
 
-No dataset image appears in the output. The Hateful Memes images are under
-Meta's research licence and derived from stock photography, so redistributing
-them in a public repository is not ours to do, and the benchmark is built
-around hateful content besides. Where a meme is shown, it is shown as its
-extracted text and its generated caption, which is exactly what the model
-reads anyway.
+No dataset image or text appears anywhere: the benchmark is licensed for
+research and built around hateful content.
 """
 import argparse
-import sys
-import textwrap
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-import matplotlib  # noqa: E402
+import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from sklearn.metrics import roc_auc_score, roc_curve  # noqa: E402
-from transformers import AutoTokenizer, CLIPImageProcessor  # noqa: E402
 
-from ca_agfn.config import Config  # noqa: E402
-from ca_agfn.data import HatefulMemes, split_file  # noqa: E402
-from ca_agfn.model import CAAGFN  # noqa: E402
+from ca_agfn.config import ROOT  # noqa: E402
+from ca_agfn.results import load, summarise  # noqa: E402
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -44,6 +31,34 @@ GRID = "#e1e0d9"
 BASELINE = "#c3c2b7"
 SERIES_1 = "#2a78d6"   # blue
 SERIES_2 = "#eb6834"   # orange
+SERIES_3 = "#1a9e77"   # aqua
+
+# Kiela et al. (2020), Table 1, validation AUROC. The same 500 memes that are
+# the test split here.
+PUBLISHED = (("Text BERT", 0.6505), ("MMBT-Grid", 0.6673),
+             ("Visual BERT", 0.7414))
+FIRST_VERSION = 0.6741  # selected and scored on the same split, so optimistic
+
+SHORT = {
+    "full": "CA-AGFN, full",
+    "no_entropy": "− entropy in the gate",
+    "no_clash": "− clash vector",
+    "no_captions": "− BLIP captions",
+    "xlmr": "XLM-R text encoder (v1)",
+    "concat": "Concat, no fusion",
+    "text_only": "Text only",
+    "image_only": "Image only",
+}
+
+
+def reference(ax, x, name, colour=BASELINE):
+    """A dashed vertical reference, labelled along itself at the bottom."""
+    ax.axvline(x, color=colour, linewidth=1, linestyle=(0, (3, 3)), zorder=1)
+    ax.annotate(name, (x, 0), xycoords=("data", "axes fraction"),
+                xytext=(3, 4), textcoords="offset points", rotation=90,
+                fontsize=7.5, color=INK_MUTED, ha="left", va="bottom",
+                bbox={"boxstyle": "square,pad=0.1", "fc": SURFACE, "ec": "none"},
+                zorder=5)
 
 
 def style():
@@ -52,217 +67,161 @@ def style():
         "savefig.facecolor": SURFACE, "font.family": "sans-serif",
         "font.sans-serif": ["DejaVu Sans", "sans-serif"], "font.size": 9,
         "axes.titlesize": 10.5, "axes.titleweight": "bold",
-        "axes.titlecolor": INK, "axes.labelsize": 9,
-        "axes.labelcolor": INK_SECONDARY, "axes.edgecolor": BASELINE,
-        "axes.linewidth": 0.8, "axes.grid": True, "grid.color": GRID,
-        "grid.linewidth": 0.7, "xtick.color": INK_MUTED,
-        "ytick.color": INK_MUTED, "xtick.labelsize": 8.5,
-        "ytick.labelsize": 8.5, "legend.frameon": False, "legend.fontsize": 8.5,
+        "axes.titlecolor": INK, "axes.titlelocation": "left",
+        "axes.labelsize": 9, "axes.labelcolor": INK_SECONDARY,
+        "axes.edgecolor": BASELINE, "axes.linewidth": 0.8, "axes.grid": True,
+        "grid.color": GRID, "grid.linewidth": 0.7, "xtick.color": INK_MUTED,
+        "ytick.color": INK_SECONDARY, "xtick.labelsize": 8.5,
+        "ytick.labelsize": 8.5, "legend.frameon": False,
+        "legend.fontsize": 8.5,
     })
 
 
-def strip(ax, keep=("left", "bottom")):
+def strip(ax, keep=("bottom",)):
     for side, spine in ax.spines.items():
         spine.set_visible(side in keep)
 
 
-@torch.no_grad()
-def collect(model, dataset, device, batch_size=32):
-    """Probability, gate and entropy for every meme in the split."""
-    model.eval()
-    probabilities, gates, entropies = [], [], []
+def panel_ablations(ax, runs, summary):
+    order = [v for v in SHORT if v in summary][::-1]
+    for row, variant in enumerate(order):
+        scores = [run["test"]["auroc"] for run in runs[variant]]
+        stat = summary[variant]["test_auroc"]
+        colour = SERIES_1 if variant == "full" else INK_SECONDARY
+        ax.hlines(row, stat["mean"] - stat["std"], stat["mean"] + stat["std"],
+                  color=colour, linewidth=2, zorder=3)
+        ax.scatter(scores, [row] * len(scores), s=16, color=colour, alpha=0.35,
+                   edgecolor="none", zorder=3)
+        ax.scatter([stat["mean"]], [row], s=64, color=colour, zorder=4,
+                   edgecolor=SURFACE, linewidth=2)
+        ax.annotate(f"{stat['mean']:.3f}", (stat["mean"] + stat["std"], row),
+                    textcoords="offset points", xytext=(6, -3), fontsize=8.5,
+                    color=INK, fontweight="bold" if variant == "full" else None)
 
-    for start in range(0, len(dataset), batch_size):
-        rows = [dataset[i] for i in range(start, min(start + batch_size,
-                                                     len(dataset)))]
-        batch = {
-            key: torch.stack([row[key] for row in rows]).to(device)
-            for key in ("input_ids", "attention_mask", "pixel_values")
-        }
-        logits, extra = model(**batch, return_gate=True)
-        probabilities.append(torch.sigmoid(logits.float()).cpu().numpy())
-        gates.append(extra["gate"].float().cpu().numpy())
-        entropies.append(extra["entropy"].float().cpu().numpy())
+    for name, value in PUBLISHED:
+        reference(ax, value, name)
+    reference(ax, FIRST_VERSION, "v1", SERIES_2)
 
-    return (np.concatenate(probabilities), np.concatenate(gates),
-            np.concatenate(entropies))
-
-
-def panel_gate_against_entropy(ax, entropy, gate):
-    """The architecture's claim, measured rather than asserted."""
-    ax.scatter(entropy, gate, s=14, color=SERIES_1, alpha=0.35,
-               edgecolor="none", zorder=2)
-
-    # A trend line, because 500 translucent dots can hide a weak relationship.
-    order = np.argsort(entropy)
-    window = max(15, len(entropy) // 20)
-    smoothed = np.convolve(gate[order], np.ones(window) / window, mode="valid")
-    ax.plot(entropy[order][window - 1:], smoothed, color=SERIES_2, linewidth=2,
-            zorder=4, label="Rolling mean")
-
-    correlation = float(np.corrcoef(entropy, gate)[0, 1])
-    ax.annotate(f"r = {correlation:+.2f}", (0.03, 0.05),
-                xycoords="axes fraction", fontsize=10, color=INK,
-                fontweight="bold")
-
-    ax.set_xlabel("Entropy of the text's attention over the image")
-    ax.set_ylabel("Gate: weight given to the text")
-    ax.set_title("Does the entropy gate do what it claims?")
-    ax.legend(loc="upper right")
+    ax.set_yticks(range(len(order)))
+    ax.set_yticklabels([SHORT[v] for v in order])
+    ax.set_ylim(-0.6, len(order) - 0.6)
+    ax.grid(axis="y", visible=False)
+    ax.set_xlabel("Test AUROC, mean ± sd over seeds (dots are seeds); dashed: "
+                  "published baselines and v1")
+    ax.set_title("What each part is worth")
     strip(ax)
 
 
-def panel_roc(ax, labels, probabilities):
-    false_positive, true_positive, _ = roc_curve(labels, probabilities)
-    auroc = roc_auc_score(labels, probabilities)
+def panel_shuffle(ax, summary):
+    order = [v for v in ("image_only", "text_only", "concat", "full")
+             if v in summary]
+    conditions = (("test_auroc", "Intact", SERIES_1),
+                  ("auroc_shuffled_image", "Images shuffled", SERIES_2),
+                  ("auroc_shuffled_text", "Texts shuffled", SERIES_3))
+    for row, variant in enumerate(order):
+        values = [summary[variant][key]["mean"] for key, _, _ in conditions]
+        ax.hlines(row, min(values), max(values), color=BASELINE, linewidth=1.2,
+                  zorder=2)
+        for (_, name, colour), value in zip(conditions, values, strict=True):
+            ax.scatter([value], [row], s=64, color=colour, zorder=4,
+                       edgecolor=SURFACE, linewidth=2,
+                       label=name if row == 0 else None)
 
+    reference(ax, 0.5, "chance")
+    ax.set_yticks(range(len(order)))
+    ax.set_yticklabels([SHORT[v] for v in order])
+    ax.set_ylim(-0.6, len(order) - 0.6)
+    ax.grid(axis="y", visible=False)
+    ax.set_xlabel("Test AUROC, mean over seeds")
+    ax.set_title("Does the model read both halves of the meme?")
+    ax.legend(loc="upper left", ncol=3, bbox_to_anchor=(0, -0.13),
+              handletextpad=0.2, columnspacing=1.2)
+    strip(ax)
+
+
+def panel_gate(ax, runs):
+    run = runs["full"][0]
+    entropy = np.array(run["predictions"]["entropy"])
+    gate = np.array(run["predictions"]["gate"])
+    ax.scatter(entropy, gate, s=14, color=SERIES_1, alpha=0.35,
+               edgecolor="none", zorder=2)
+
+    order = np.argsort(entropy)
+    window = max(15, len(entropy) // 20)
+    smoothed = np.convolve(gate[order], np.ones(window) / window, mode="valid")
+    ax.plot(entropy[order][window - 1:], smoothed, color=SERIES_2,
+            linewidth=2, zorder=4, label="Rolling mean")
+
+    correlations = [r["gate"]["r_entropy"] for r in runs["full"]]
+    text = f"r = {correlations[0]:+.2f} (seed {run['seed']})"
+    if len(correlations) > 1:
+        text += (f"\nr = {np.mean(correlations):+.2f} ± "
+                 f"{np.std(correlations, ddof=1):.2f} over "
+                 f"{len(correlations)} seeds")
+    ax.annotate(text, (0.03, 0.05), xycoords="axes fraction", fontsize=9,
+                color=INK, fontweight="bold")
+    ax.set_xlabel("Entropy of the text's attention over the image, "
+                  "real tokens only")
+    ax.set_ylabel("Gate: weight given to the text")
+    ax.set_title("Does the entropy gate do what it claims?")
+    ax.legend(loc="upper right")
+    strip(ax, keep=("left", "bottom"))
+
+
+def panel_roc(ax, runs, summary):
     ax.plot([0, 1], [0, 1], color=BASELINE, linewidth=1.2,
             linestyle=(0, (3, 3)), zorder=2, label="Chance")
-    ax.plot(false_positive, true_positive, color=SERIES_1, linewidth=2,
-            zorder=3, label=f"CA-AGFN, AUROC {auroc:.3f}")
-
+    for index, run in enumerate(runs["full"]):
+        ax.plot(run["roc"]["fpr"], run["roc"]["tpr"], color=SERIES_1,
+                linewidth=1.6, alpha=0.8, zorder=3,
+                label="CA-AGFN, one line per seed" if index == 0 else None)
+    stat = summary["full"]["test_auroc"]
+    ax.annotate(f"AUROC {stat['mean']:.3f} ± {stat['std']:.3f}", (0.97, 0.2),
+                xycoords="axes fraction", ha="right", fontsize=9, color=INK,
+                fontweight="bold")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_xlabel("False positive rate")
     ax.set_ylabel("True positive rate")
-    ax.set_title("Validation ROC, 500 memes")
-    ax.legend(loc="lower right")
-    strip(ax)
-
-
-def panel_gate_by_label(ax, gate, labels):
-    """Whether the gate settles differently on hateful and benign memes."""
-    groups = [("Not hateful", gate[labels == 0], SERIES_1),
-              ("Hateful", gate[labels == 1], SERIES_2)]
-
-    for row, (name, values, colour) in enumerate(groups):
-        low, mid, high = np.percentile(values, [25, 50, 75])
-        ax.hlines(row, low, high, color=colour, linewidth=7, alpha=0.30,
-                  zorder=2)
-        ax.scatter([mid], [row], s=80, color=colour, zorder=4,
-                   edgecolor=SURFACE, linewidth=2, label=name)
-        ax.annotate(f"{mid:.2f}", (mid, row), textcoords="offset points",
-                    xytext=(0, 13), ha="center", fontsize=9, color=INK,
-                    fontweight="bold")
-        ax.annotate(f"n={len(values)}", (high, row),
-                    textcoords="offset points", xytext=(10, -3), fontsize=7.5,
-                    color=INK_MUTED)
-
-    ax.set_yticks(range(len(groups)))
-    ax.set_yticklabels([name for name, _, _ in groups])
-    ax.set_ylim(-0.7, len(groups) - 0.3)
-    ax.set_xlabel("Gate: weight given to the text")
-    ax.set_title("Where the gate settles, by label")
-    ax.grid(axis="y", visible=False)
-    ax.legend(loc="lower right", ncol=2)
-    strip(ax)
-
-
-def panel_examples(ax, frame, probabilities, gates, entropies, n=3):
-    """Real validation memes, as the model reads them.
-
-    Benign memes only, and the picture is represented by the caption the model
-    was given. Reproducing the images would redistribute a licensed research
-    dataset built around hateful content.
-    """
-    ax.axis("off")
-    ax.set_title("Three real memes, as the model reads them", loc="left")
-
-    benign = np.flatnonzero(frame["label"].to_numpy() == 0)
-    # Spread across the entropy range so the examples are not all alike.
-    chosen = benign[np.argsort(entropies[benign])][
-        np.linspace(0, len(benign) - 1, n).astype(int)]
-
-    y = 0.95
-    for index in chosen:
-        row = frame.iloc[index]
-        text = str(row.get("text", ""))[:90]
-        caption = str(row.get("caption", ""))[:70]
-
-        ax.text(0.0, y, "text", fontsize=7.5, color=INK_MUTED,
-                transform=ax.transAxes)
-        ax.text(0.11, y, textwrap.shorten(text, 88, placeholder=" ..."),
-                fontsize=8.5, color=INK, transform=ax.transAxes)
-        y -= 0.075
-        ax.text(0.0, y, "image", fontsize=7.5, color=INK_MUTED,
-                transform=ax.transAxes)
-        ax.text(0.11, y, textwrap.shorten(caption or "(no caption)", 88,
-                                          placeholder=" ..."),
-                fontsize=8.5, color=INK_SECONDARY, style="italic",
-                transform=ax.transAxes)
-        y -= 0.075
-        ax.text(0.11, y,
-                f"entropy {entropies[index]:.2f}    "
-                f"gate {gates[index]:.2f}    "
-                f"P(hateful) {probabilities[index]:.2f}    "
-                f"truth: not hateful",
-                fontsize=8.5, color=SERIES_1, fontweight="bold",
-                transform=ax.transAxes)
-        y -= 0.13
+    ax.set_title("Test ROC, full model")
+    ax.legend(loc="lower right", bbox_to_anchor=(1, 0.26))
+    strip(ax, keep=("left", "bottom"))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", default=None)
-    parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--device", default=None)
+    parser.add_argument("--results", default=str(ROOT / "results"))
     parser.add_argument("--out", default=str(ROOT / "docs" / "results.png"))
     args = parser.parse_args()
 
-    config = Config()
-    if args.data:
-        config.data_dir = Path(args.data)
-    device = torch.device(
-        args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-
-    checkpoint_path = Path(
-        args.checkpoint or (config.checkpoint_dir / "phase2_best.pt"))
-    if not checkpoint_path.exists():
-        raise SystemExit(
-            f"No checkpoint at {checkpoint_path}. Run scripts/train.py first."
-        )
-
-    tokenizer = AutoTokenizer.from_pretrained(config.text_model)
-    processor = CLIPImageProcessor.from_pretrained(config.vision_model)
-    dataset = HatefulMemes(
-        split_file(config.data_dir, "dev", config.use_captions),
-        config.data_dir, tokenizer, processor, config.max_text_length,
-        train=False, use_captions=config.use_captions,
-    )
-
-    model = CAAGFN(config)
-    model.load_state_dict(
-        torch.load(checkpoint_path, map_location=device,
-                   weights_only=False)["state_dict"])
-    model.to(device)
-
-    probabilities, gates, entropies = collect(model, dataset, device)
-    labels = dataset.labels.numpy()
+    runs = load(args.results)
+    if "full" not in runs:
+        raise SystemExit(f"No results for the full model under {args.results}.")
+    summary = summarise(runs)
 
     style()
-    figure, axes = plt.subplots(2, 2, figsize=(12.5, 8.6))
-    panel_gate_against_entropy(axes[0, 0], entropies, gates)
-    panel_roc(axes[0, 1], labels, probabilities)
-    panel_gate_by_label(axes[1, 0], gates, labels)
-    panel_examples(axes[1, 1], dataset.frame, probabilities, gates, entropies)
+    figure, axes = plt.subplots(2, 2, figsize=(13, 9.4),
+                                gridspec_kw={"hspace": 0.45, "wspace": 0.28})
+    panel_ablations(axes[0, 0], runs, summary)
+    panel_shuffle(axes[0, 1], summary)
+    panel_gate(axes[1, 0], runs)
+    panel_roc(axes[1, 1], runs, summary)
 
-    figure.suptitle(
-        "CA-AGFN on the Hateful Memes validation split",
-        fontsize=13, fontweight="bold", color=INK, x=0.012, ha="left", y=0.985)
+    figure.suptitle("CA-AGFN on the Hateful Memes dev split, held out as test",
+                    fontsize=13, fontweight="bold", color=INK, x=0.012,
+                    ha="left", y=0.985)
     figure.text(
-        0.012, 0.945,
-        "No dataset image is reproduced: the benchmark is licensed for "
-        "research and built around hateful content. A meme is shown as the "
-        "text and caption the model reads.",
+        0.012, 0.95,
+        "Checkpoints and thresholds chosen on 500 memes held out from train; "
+        "the 500 test memes are scored once. No dataset image or text is "
+        "reproduced.",
         fontsize=8.5, color=INK_MUTED, ha="left")
-    figure.tight_layout(rect=[0, 0, 1, 0.925])
+    figure.subplots_adjust(left=0.15, right=0.98, top=0.88, bottom=0.07)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(out, dpi=150)
     print(f"Wrote {out}")
-    print(f"AUROC {roc_auc_score(labels, probabilities):.4f}   "
-          f"gate against entropy r = {np.corrcoef(entropies, gates)[0, 1]:+.3f}")
 
 
 if __name__ == "__main__":
