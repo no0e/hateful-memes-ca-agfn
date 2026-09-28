@@ -1,11 +1,15 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
+*.egg-info/
 .venv/
 venv/
 .DS_Store
 data/
 checkpoints/
+logs/
 *.pt
+*.safetensors
 nohup.out
-install.log
+*.log

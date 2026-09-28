@@ -1,141 +1,173 @@
-"""Train CA-AGFN in two phases.
+"""Train one variant with one seed, then score it once on the test split.
 
-    python scripts/train.py                  # the real run
-    python scripts/train.py --smoke          # 64 samples, one epoch each
+    python scripts/train.py                            # the full model
+    python scripts/train.py --variant concat --seed 1  # one ablation
+    python scripts/train.py --smoke                    # fake data, tiny model
 
-The smoke run exists so the whole path can be exercised on a CPU in a couple of
-minutes. It proves the code runs; it proves nothing about the model.
+Writes results/<variant>/seed<seed>.json: the config, the training history,
+validation and test scores with a bootstrap interval, the AUROC with images and
+with texts shuffled between memes, the gate statistics, and per-meme outputs
+for the figures. Nothing in it comes from the dataset but ids.
+
+The smoke run generates a fake dataset and uses a tiny random CLIP, so it runs
+on a CPU in under a minute with nothing downloaded but a few megabytes. It
+proves the pipeline runs end to end. It proves nothing about the model.
 """
 import argparse
 import json
-import random
+import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+import torch
+from transformers import AutoTokenizer, CLIPImageProcessor
+from transformers.utils import logging as hf_logging
 
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from transformers import AutoTokenizer, CLIPImageProcessor  # noqa: E402
+from ca_agfn.checkpoint import save_checkpoint
+from ca_agfn.config import ROOT, VARIANTS, config_for
+from ca_agfn.data import build_loaders
+from ca_agfn.evaluation import report
+from ca_agfn.metrics import finite_or_none
+from ca_agfn.model import CAAGFN
+from ca_agfn.synthetic import write_fake_dataset, write_tiny_text_model
+from ca_agfn.training import fit, seed_everything
 
-from ca_agfn.config import Config  # noqa: E402
-from ca_agfn.data import build_loaders, write_history  # noqa: E402
-from ca_agfn.model import CAAGFN  # noqa: E402
-from ca_agfn.training import evaluate, train_phase  # noqa: E402
-
-
-def seed_everything(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+TINY_CLIP = "hf-internal-testing/tiny-random-CLIPModel"
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def git_commit():
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
+            capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def clean(value):
+    """Recursively swap NaN for None, which JSON can hold."""
+    if isinstance(value, dict):
+        return {key: clean(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [clean(item) for item in value]
+    return finite_or_none(value)
+
+
+def parse(argv=None):
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--variant", default="full", choices=sorted(VARIANTS))
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--data", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--phase2-epochs", type=int, default=None,
-                        help="Phase 2 was still improving at epoch 10 on the "
-                             "first full run, so it is worth raising.")
+    parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument("--phase1-epochs", type=int, default=None)
+    parser.add_argument("--phase2-epochs", type=int, default=None)
     parser.add_argument("--patience", type=int, default=None)
     parser.add_argument("--unfreeze", type=int, default=None,
                         help="How many top blocks of each backbone to open.")
+    parser.add_argument("--results", default=str(ROOT / "results"),
+                        help="Directory for <variant>/seed<seed>.json.")
+    parser.add_argument("--checkpoint", default=None,
+                        help="Also save the tuned weights here (.safetensors).")
     parser.add_argument("--smoke", action="store_true",
-                        help="64 samples and one epoch per phase.")
-    parser.add_argument("--out", default=str(ROOT / "docs"))
-    args = parser.parse_args()
+                        help="Fake data and a tiny model, one epoch per phase.")
+    return parser.parse_args(argv)
 
-    config = Config()
-    if args.data:
-        config.data_dir = Path(args.data)
-    if args.batch_size:
-        config.batch_size = args.batch_size
-    if args.phase2_epochs:
-        config.phase2_epochs = args.phase2_epochs
-    if args.patience:
-        config.patience = args.patience
-    if args.unfreeze:
-        config.unfreeze_top = args.unfreeze
-    limit = 64 if args.smoke else None
+
+def main(argv=None):
+    args = parse(argv)
+    hf_logging.set_verbosity_error()
+
+    overrides = {"seed": args.seed}
+    for key, value in (("data_dir", args.data), ("batch_size", args.batch_size),
+                       ("num_workers", args.workers),
+                       ("phase1_epochs", args.phase1_epochs),
+                       ("phase2_epochs", args.phase2_epochs),
+                       ("patience", args.patience),
+                       ("unfreeze_top", args.unfreeze)):
+        if value is not None:
+            overrides[key] = value
+
+    scratch = None
     if args.smoke:
-        config.phase1_epochs = 1
-        config.phase2_epochs = 1
-        config.batch_size = min(config.batch_size, 8)
-        config.num_workers = 0
+        scratch = tempfile.TemporaryDirectory()
+        overrides.update({
+            "data_dir": write_fake_dataset(Path(scratch.name) / "data"),
+            "text_model": TINY_CLIP, "vision_model": TINY_CLIP,
+            "hidden_size": 64, "phase1_epochs": 1, "phase2_epochs": 1,
+            "batch_size": 8, "num_workers": 0, "val_size": 16,
+        })
+        if "text_model" in VARIANTS[args.variant]:
+            overrides["text_model"] = str(write_tiny_text_model(
+                Path(scratch.name) / "text_model", TINY_CLIP))
+    config = config_for(args.variant, **overrides)
 
     seed_everything(config.seed)
     device = torch.device(
         args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"Device: {device}")
-    if device.type == "cuda":
-        print(f"  {torch.cuda.get_device_name(0)}")
+    device_name = (torch.cuda.get_device_name(0) if device.type == "cuda"
+                   else "cpu")
+    print(f"Variant {args.variant}, seed {config.seed}, on {device_name}")
 
     tokenizer = AutoTokenizer.from_pretrained(config.text_model)
     image_processor = CLIPImageProcessor.from_pretrained(config.vision_model)
-    train_loader, val_loader, pos_weight = build_loaders(
-        config, tokenizer, image_processor, limit=limit)
-    print(f"Train {len(train_loader.dataset):,}  "
-          f"val {len(val_loader.dataset):,}  "
+    loaders, pos_weight, used_captions = build_loaders(
+        config, tokenizer, image_processor, pin_memory=device.type == "cuda")
+    print(f"Train {len(loaders['train'].dataset):,}  "
+          f"val {len(loaders['val'].dataset):,}  "
+          f"test {len(loaders['test'].dataset):,}  "
           f"pos_weight {pos_weight.item():.3f}  "
-          f"captions {'yes' if train_loader.dataset.has_captions else 'no'}")
+          f"captions {'yes' if used_captions else 'no'}")
 
-    model = CAAGFN(config)
+    started = time.time()
+    model = CAAGFN(config).to(device)
+    history, summary = fit(model, loaders, config, pos_weight, device)
+    scores = report(model, loaders, device, seed=config.seed)
+    minutes = (time.time() - started) / 60
 
-    # Phase 1: the new modules learn against frozen backbones. Starting with
-    # everything unfrozen sends a large gradient from a randomly initialised
-    # head straight into pretrained weights, which is how the useful part of a
-    # pretrained encoder gets destroyed in the first few steps.
-    model.freeze_backbones()
-    history, phase1_path, phase1_auroc = train_phase(
-        model, train_loader, val_loader, config, 1, pos_weight, device,
-        config.checkpoint_dir)
+    test = scores["test"]
+    low, high = test["auroc_ci95"]
+    print(f"\nTest AUROC {test['auroc']:.4f}  [{low:.3f}, {high:.3f}]  "
+          f"accuracy {test['accuracy']:.4f}  F1 {test['f1_macro']:.4f}")
+    print(f"  with images shuffled {test['auroc_shuffled_image']:.4f}, "
+          f"with texts shuffled {test['auroc_shuffled_text']:.4f}")
+    if "gate" in scores:
+        gate = scores["gate"]
+        print(f"  entropy {gate['entropy_mean']:.3f} ± {gate['entropy_std']:.3f}"
+              f", gate against entropy r = {gate['r_entropy']:+.3f}")
+    print(f"  steps skipped as non-finite: {summary['skipped_steps']}")
 
-    # Phase 2: open the top blocks only. Embeddings and position tables stay
-    # frozen; opening those makes phase two diverge on its first step.
-    model.unfreeze_top(config.unfreeze_top)
-    history, phase2_path, phase2_auroc = train_phase(
-        model, train_loader, val_loader, config, 2, pos_weight, device,
-        config.checkpoint_dir, history=history)
-
-    best_path = phase2_path if phase2_auroc >= phase1_auroc else phase1_path
-    best_auroc = max(phase1_auroc, phase2_auroc)
-
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    write_history(history, out / "history.json")
-
-    checkpoint = torch.load(best_path, map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint["state_dict"])
-    final = evaluate(model, val_loader, device)
-
-    summary = {
-        "phase1_auroc": phase1_auroc,
-        "phase2_auroc": phase2_auroc,
-        "best_auroc": best_auroc,
-        "best_checkpoint": str(best_path),
-        "final": final,
-        "skipped_steps_total": int(sum(history["skipped_steps"])),
+    results = clean({
+        "variant": args.variant,
+        "seed": config.seed,
         "smoke": args.smoke,
-    }
-    (out / "results.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8")
+        "commit": git_commit(),
+        "device": device_name,
+        "minutes": round(minutes, 1),
+        "captions": used_captions,
+        "config": config.to_dict(),
+        "training": summary,
+        "history": history,
+        **scores,
+    })
+    out = Path(args.results) / args.variant / f"seed{config.seed}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(results, indent=1), encoding="utf-8")
+    print(f"Wrote {out}")
 
-    print(f"\nPhase 1 best AUROC {phase1_auroc:.4f}")
-    print(f"Phase 2 best AUROC {phase2_auroc:.4f}")
-    print(f"Final: AUROC {final['auroc']:.4f}  "
-          f"accuracy {final['accuracy']:.4f}  F1 {final['f1_macro']:.4f}")
-    skipped = summary["skipped_steps_total"]
-    print(
-        f"Steps skipped as non-finite: {skipped}"
-        + ("  (the gradient guard did its job)" if skipped else
-           "  (nothing diverged)")
-    )
-    print(f"Wrote {out / 'results.json'}")
+    if args.checkpoint:
+        path = save_checkpoint(model, args.checkpoint, {
+            "variant": args.variant, "test_auroc": test["auroc"]})
+        print(f"Wrote {path}")
+
+    if scratch is not None:
+        scratch.cleanup()
+    return results
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(0 if main() else 1)

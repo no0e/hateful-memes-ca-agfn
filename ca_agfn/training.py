@@ -16,14 +16,25 @@ bad batch is dropped and the weights are never touched. `skipped_steps` counts
 how often that happens, because a guard that silently eats half the batches is
 its own kind of failure.
 """
-import copy
 import math
+import random
+import time
 
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from transformers import get_cosine_schedule_with_warmup
+
+from .evaluation import evaluate
+from .metrics import auroc
+
+
+def seed_everything(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 class ExponentialMovingAverage:
@@ -88,23 +99,21 @@ def parameter_groups(model, config, phase):
     """Layer-wise learning rate decay over the unfrozen backbone blocks.
 
     Deeper blocks encode more general features and are moved less. In phase one
-    nothing but the new modules moves at all.
+    nothing but the new modules moves at all. Depth is counted from the top of
+    each backbone, whatever its number of blocks.
     """
     custom, backbone = [], {}
+    depths = model.block_depths()
 
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        if any(key in name for key in model.CUSTOM_MODULES):
+        if model.is_custom(name):
             custom.append(parameter)
             continue
-        for marker, tag in (("encoder.layer.", "text"),
-                            ("encoder.layers.", "vision")):
-            if marker in name:
-                index = int(name.split(marker)[1].split(".")[0])
-                backbone.setdefault(f"{tag}_{index}", {
-                    "params": [], "index": index}) ["params"].append(parameter)
-                break
+        if id(parameter) not in depths:
+            raise RuntimeError(f"{name} is trainable but sits in no block.")
+        backbone.setdefault(depths[id(parameter)], []).append(parameter)
 
     if phase == 1:
         return [{
@@ -112,15 +121,12 @@ def parameter_groups(model, config, phase):
             "weight_decay": config.weight_decay_head, "name": "head",
         }]
 
-    groups = []
-    for name, group in backbone.items():
-        offset = 11 - group["index"]
-        groups.append({
-            "params": group["params"],
-            "lr": config.phase2_lr_backbone * (config.llrd_decay ** offset),
-            "weight_decay": config.weight_decay_backbone,
-            "name": name,
-        })
+    groups = [{
+        "params": params,
+        "lr": config.phase2_lr_backbone * (config.llrd_decay ** depth),
+        "weight_decay": config.weight_decay_backbone,
+        "name": f"backbone_depth_{depth}",
+    } for depth, params in sorted(backbone.items())]
     groups.append({
         "params": custom, "lr": config.phase2_lr_head,
         "weight_decay": config.weight_decay_head, "name": "head",
@@ -128,41 +134,23 @@ def parameter_groups(model, config, phase):
     return groups
 
 
-@torch.no_grad()
-def evaluate(model, loader, device, threshold=0.5):
-    model.eval()
-    probabilities, labels = [], []
-    for batch in loader:
-        logits = model(
-            batch["input_ids"].to(device),
-            batch["attention_mask"].to(device),
-            batch["pixel_values"].to(device),
-        )
-        probabilities.append(torch.sigmoid(logits.float()).cpu().numpy())
-        labels.append(batch["label"].numpy())
-
-    probabilities = np.concatenate(probabilities)
-    labels = np.concatenate(labels)
-    predictions = (probabilities > threshold).astype(int)
-    try:
-        auroc = float(roc_auc_score(labels, probabilities))
-    except ValueError:  # a batch of one class only
-        auroc = float("nan")
-    return {
-        "auroc": auroc,
-        "accuracy": float(accuracy_score(labels, predictions)),
-        "f1_macro": float(f1_score(labels, predictions, average="macro")),
-    }
+def _batch(batch, device):
+    return (batch["input_ids"].to(device), batch["attention_mask"].to(device),
+            batch["pixel_values"].to(device))
 
 
 def train_phase(model, train_loader, val_loader, config, phase, pos_weight,
-                device, checkpoint_dir, history=None, verbose=True):
-    """One phase. Returns the history and the path of the best checkpoint."""
+                device, history=None, verbose=True):
+    """One phase. Returns the history, the best weights and their val AUROC.
+
+    The best weights are the tuned parameters only, kept in memory: a full
+    state dict per epoch would mostly be copies of frozen CLIP.
+    """
     model.to(device)
     epochs = config.phase1_epochs if phase == 1 else config.phase2_epochs
     history = history or {
-        "epoch": [], "phase": [], "loss": [], "auroc": [], "accuracy": [],
-        "f1_macro": [], "skipped_steps": [],
+        "epoch": [], "phase": [], "loss": [], "val_auroc": [],
+        "skipped_steps": [], "seconds": [],
     }
 
     optimiser = torch.optim.AdamW(
@@ -181,11 +169,11 @@ def train_phase(model, train_loader, val_loader, config, phase, pos_weight,
         print(f"\nPhase {phase}: {trainable:,} / {total:,} trainable "
               f"({100 * trainable / total:.2f}%)")
 
-    best_auroc, best_path, no_improvement = -1.0, None, 0
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    best_auroc, best_state, no_improvement = -1.0, None, 0
 
     for epoch in range(epochs):
         model.train()
+        started = time.time()
         running, counted, skipped = 0.0, 0, 0
 
         for batch in train_loader:
@@ -195,11 +183,7 @@ def train_phase(model, train_loader, val_loader, config, phase, pos_weight,
                 + 0.5 * config.label_smoothing
             )
 
-            logits = model(
-                batch["input_ids"].to(device),
-                batch["attention_mask"].to(device),
-                batch["pixel_values"].to(device),
-            )
+            logits = model(*_batch(batch, device))
             loss = criterion(logits.float(), targets)
 
             optimiser.zero_grad(set_to_none=True)
@@ -208,8 +192,8 @@ def train_phase(model, train_loader, val_loader, config, phase, pos_weight,
                 continue
             loss.backward()
 
-            # The check that was missing. Clipping a NaN norm poisons every
-            # gradient, and the optimiser then writes that into the weights.
+            # Clipping a NaN norm poisons every gradient, and the optimiser
+            # then writes that into the weights, so check first.
             if not gradients_are_finite(model):
                 skipped += 1
                 optimiser.zero_grad(set_to_none=True)
@@ -231,52 +215,61 @@ def train_phase(model, train_loader, val_loader, config, phase, pos_weight,
                 "rate or unfreeze fewer layers."
             )
 
-        average_loss = running / counted
-        if ema is not None:
-            backup = ema.swap_in(model)
-            metrics = evaluate(model, val_loader, device)
-            ema.swap_out(model, backup)
+        backup = ema.swap_in(model) if ema is not None else None
+        scores = evaluate(model, val_loader, device)
+        val_auroc = auroc(scores["label"], scores["probability"])
+        improved = not math.isnan(val_auroc) and val_auroc > best_auroc
+        if improved:
+            best_auroc, best_state, no_improvement = (
+                val_auroc, model.tuned_state_dict(), 0)
         else:
-            metrics = evaluate(model, val_loader, device)
+            no_improvement += 1
+        if ema is not None:
+            ema.swap_out(model, backup)
 
         history["epoch"].append(epoch + 1)
         history["phase"].append(phase)
-        history["loss"].append(average_loss)
+        history["loss"].append(running / counted)
+        history["val_auroc"].append(val_auroc)
         history["skipped_steps"].append(skipped)
-        for key in ("auroc", "accuracy", "f1_macro"):
-            history[key].append(metrics[key])
+        history["seconds"].append(round(time.time() - started, 1))
 
         if verbose:
             note = f"  skipped {skipped}" if skipped else ""
-            print(
-                f"  epoch {epoch + 1:2d}/{epochs}  loss {average_loss:.4f}  "
-                f"AUROC {metrics['auroc']:.4f}  acc {metrics['accuracy']:.4f}  "
-                f"F1 {metrics['f1_macro']:.4f}{note}"
-            )
+            best = "  *" if improved else ""
+            print(f"  epoch {epoch + 1:2d}/{epochs}  loss {running / counted:.4f}  "
+                  f"val AUROC {val_auroc:.4f}  {history['seconds'][-1]:.0f}s"
+                  f"{note}{best}")
 
-        if not math.isnan(metrics["auroc"]) and metrics["auroc"] > best_auroc:
-            best_auroc, no_improvement = metrics["auroc"], 0
-            if ema is not None:
-                backup = ema.swap_in(model)
-                state = copy.deepcopy(model.state_dict())
-                ema.swap_out(model, backup)
-            else:
-                state = copy.deepcopy(model.state_dict())
-
-            best_path = checkpoint_dir / f"phase{phase}_best.pt"
-            torch.save({
-                "state_dict": state, "epoch": epoch, "phase": phase,
-                "auroc": best_auroc, "history": history,
-                "config": vars(config),
-            }, best_path)
+        if phase == 2 and no_improvement >= config.patience:
             if verbose:
-                print(f"    new best AUROC {best_auroc:.4f}")
-        else:
-            no_improvement += 1
-            if phase == 2 and no_improvement >= config.patience:
-                if verbose:
-                    print(f"    stopped early after {no_improvement} epochs "
-                          "without improvement")
-                break
+                print(f"    stopped early after {no_improvement} epochs "
+                      "without improvement")
+            break
 
-    return history, best_path, best_auroc
+    return history, best_state, best_auroc
+
+
+def fit(model, loaders, config, pos_weight, device, verbose=True):
+    """Both phases. Leaves the best weights of either phase in `model`."""
+    model.freeze_backbones()
+    history, best_state, phase1 = train_phase(
+        model, loaders["train"], loaders["val"], config, 1, pos_weight,
+        device, verbose=verbose)
+    # Phase two starts from the best phase-one weights, not the last ones.
+    model.load_tuned_state_dict(best_state)
+    summary = {"phase1_val_auroc": phase1, "phase2_val_auroc": None,
+               "best_phase": 1}
+
+    if config.phase2_epochs > 0 and config.unfreeze_top > 0:
+        model.unfreeze_top(config.unfreeze_top)
+        history, state, phase2 = train_phase(
+            model, loaders["train"], loaders["val"], config, 2, pos_weight,
+            device, history=history, verbose=verbose)
+        summary["phase2_val_auroc"] = phase2
+        if state is not None and phase2 > phase1:
+            best_state, summary["best_phase"] = state, 2
+
+    model.load_tuned_state_dict(best_state)
+    summary["skipped_steps"] = int(sum(history["skipped_steps"]))
+    return history, summary
