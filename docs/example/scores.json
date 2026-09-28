@@ -1,17 +1,18 @@
 {
   "text": "no need to panic",
-  "device": "NVIDIA A2",
-  "note": "Written by scripts/example.py on the GPU run of the per-head entropy model, AUROC 0.6741. Kept so the figure can be redrawn without the 1.4 GB checkpoint.",
+  "device": "Tesla T4",
+  "checkpoint": "full_seed0.safetensors",
+  "note": "Written by scripts/example.py, so the figure can be redrawn with --scores and no checkpoint.",
   "panels": {
     "The mountain, before": {
-      "probability": 0.0985,
-      "gate": 0.3348,
-      "entropy": 0.9889
+      "probability": 0.0669,
+      "gate": 0.3225,
+      "entropy": 0.9998
     },
     "The same mountain, erupting": {
-      "probability": 0.1836,
-      "gate": 0.2963,
-      "entropy": 0.9938
+      "probability": 0.1059,
+      "gate": 0.3446,
+      "entropy": 0.9998
     }
   }
 }
