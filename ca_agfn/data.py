@@ -216,11 +216,17 @@ def build_loaders(config, tokenizer, image_processor, pin_memory=False):
             print(f"  warning: {missing} image files are missing and will be "
                   "read as blank")
 
+    # Workers exist to decode images. A text-only model has nothing for them
+    # to do, and eight of them forked to hand over pre-tokenised tensors once
+    # deadlocked on the first batch; in-process it takes a third of a second
+    # per epoch. The timeout turns any other hang into an error.
+    workers = config.num_workers if config.uses_image else 0
     common = {
         "batch_size": config.batch_size,
-        "num_workers": config.num_workers,
+        "num_workers": workers,
         "pin_memory": pin_memory,
-        "persistent_workers": config.num_workers > 0,
+        "persistent_workers": workers > 0,
+        "timeout": 600 if workers else 0,
     }
     loaders = {
         name: DataLoader(dataset, shuffle=name == "train",
