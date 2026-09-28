@@ -2,7 +2,7 @@
  "variant": "text_only",
  "seed": 0,
  "smoke": false,
- "commit": "6855bdd",
+ "commit": "fedf9b7",
  "device": "Tesla T4",
  "minutes": 3.4,
  "captions": false,

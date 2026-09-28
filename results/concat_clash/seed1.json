@@ -2,7 +2,7 @@
  "variant": "concat_clash",
  "seed": 1,
  "smoke": false,
- "commit": "e278aad",
+ "commit": "6b79dab",
  "device": "Tesla T4",
  "minutes": 9.6,
  "captions": true,
