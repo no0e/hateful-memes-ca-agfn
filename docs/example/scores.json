@@ -1,0 +1,18 @@
+{
+  "text": "no need to panic",
+  "device": "Tesla T4",
+  "checkpoint": "full_seed0.safetensors",
+  "note": "Written by scripts/example.py, so the figure can be redrawn with --scores and no checkpoint.",
+  "panels": {
+    "The mountain, before": {
+      "probability": 0.0669,
+      "gate": 0.3225,
+      "entropy": 0.9998
+    },
+    "The same mountain, erupting": {
+      "probability": 0.1059,
+      "gate": 0.3446,
+      "entropy": 0.9998
+    }
+  }
+}
