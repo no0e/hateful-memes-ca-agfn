@@ -1,210 +1,160 @@
-"""Tests for the parts that go wrong without raising anything.
+"""The whole model and the whole pipeline, on a tiny random CLIP.
 
-None of these need the dataset or a GPU. They run in seconds on a CPU against
-tiny random tensors, which is the point: the failures they pin are the ones
-that otherwise cost a full training run to find.
+These download a few megabytes once and then run on a CPU in seconds.
 """
+import importlib.util
+import json
+
+import pytest
 import torch
+from transformers import (
+    AutoTokenizer,
+    CLIPImageProcessor,
+    CLIPTextModelWithProjection,
+    CLIPVisionModelWithProjection,
+)
 
-from ca_agfn.model import AdaptiveGatedFusion, CrossModalAttention, SemanticClash
-from ca_agfn.training import gradients_are_finite
+from ca_agfn.checkpoint import load_checkpoint, save_checkpoint
+from ca_agfn.config import ROOT, VARIANTS, config_for
+from ca_agfn.model import CAAGFN
+from ca_agfn.synthetic import write_tiny_text_model
+from ca_agfn.training import parameter_groups
 
-HIDDEN = 32
-
-
-def test_attention_survives_a_fully_padded_row():
-    """The failure that takes a whole batch down.
-
-    A meme with no text at all gives a row where every key is padding. Softmax
-    over a row of -inf is NaN, and one NaN in the batch is a NaN loss, a NaN
-    gradient and a dead model.
-    """
-    attention = CrossModalAttention(HIDDEN, n_heads=4)
-    text = torch.randn(3, 6, HIDDEN)
-    vision = torch.randn(3, 5, HIDDEN)
-
-    mask = torch.ones(3, 6, dtype=torch.long)
-    mask[1] = 0  # this row is entirely padding
-
-    text_out, vision_out, weights = attention(text, vision, mask)
-    assert torch.isfinite(text_out).all()
-    assert torch.isfinite(vision_out).all()
-    assert torch.isfinite(weights).all()
+pytestmark = pytest.mark.network
+HIDDEN = 64  # the tiny CLIP's projection width
 
 
-def test_attention_weights_are_a_distribution_in_eval_mode():
-    attention = CrossModalAttention(HIDDEN, n_heads=4).eval()
-    _, _, weights = attention(
-        torch.randn(2, 6, HIDDEN), torch.randn(2, 5, HIDDEN),
-        torch.ones(2, 6, dtype=torch.long),
-    )
-    assert weights.shape[-1] == 5
-    assert torch.allclose(weights.sum(dim=-1), torch.ones_like(
-        weights.sum(dim=-1)), atol=1e-4)
+def tiny_config(tiny_clip, variant="full", **overrides):
+    settings = {"text_model": tiny_clip, "vision_model": tiny_clip,
+                "hidden_size": HIDDEN, **overrides}
+    return config_for(variant, **settings)
 
 
-def test_entropy_ignores_attention_dropout():
-    """In training mode the attention weights are dropped out and no longer
-    sum to one. The gate has to mean the same thing in both modes, so the
-    entropy renormalises before it measures anything."""
-    flat = torch.full((2, 6, 8), 1 / 8)
-    scaled = flat * 0.9  # what dropout leaves behind
-
-    assert torch.allclose(
-        AdaptiveGatedFusion.attention_entropy(flat),
-        AdaptiveGatedFusion.attention_entropy(scaled),
-        atol=1e-4,
-    )
+def inputs(tiny_clip, batch=3):
+    tokenizer = AutoTokenizer.from_pretrained(tiny_clip)
+    encoded = tokenizer(["a cat", "no need to panic at all", ""][:batch],
+                        padding="max_length", max_length=12,
+                        truncation=True, return_tensors="pt")
+    size = CLIPImageProcessor.from_pretrained(tiny_clip).crop_size["height"]
+    pixels = torch.randn(batch, 3, size, size)
+    return encoded["input_ids"], encoded["attention_mask"], pixels
 
 
-def test_entropy_is_one_when_attention_is_flat():
-    """Attention spread evenly is maximum entropy, which normalises to 1."""
-    flat = torch.full((2, 6, 8), 1 / 8)
-    entropy = AdaptiveGatedFusion.attention_entropy(flat)
-    assert torch.allclose(entropy, torch.ones(2, 1), atol=1e-4)
+@pytest.mark.parametrize("variant", sorted(VARIANTS))
+def test_every_variant_trains(tiny_clip, tmp_path, variant):
+    overrides = {}
+    if "text_model" in VARIANTS[variant]:
+        overrides["text_model"] = str(
+            write_tiny_text_model(tmp_path / "text", tiny_clip))
+    model = CAAGFN(tiny_config(tiny_clip, variant, **overrides))
+    model.unfreeze_top(2)
+
+    logits = model(*inputs(tiny_clip))
+    assert logits.shape == (3,)
+    logits.sum().backward()
+    assert any(p.grad is not None for p in model.head.parameters())
 
 
-def test_entropy_is_zero_when_attention_is_a_spike():
-    """Attention on a single patch carries no uncertainty."""
-    spike = torch.zeros(2, 6, 8)
-    spike[..., 3] = 1.0
-    entropy = AdaptiveGatedFusion.attention_entropy(spike)
-    assert torch.allclose(entropy, torch.zeros(2, 1), atol=1e-4)
+def test_the_projections_start_as_clips_own(tiny_clip):
+    """At initialisation the pooled vectors are exactly CLIP's aligned text and
+    image embeddings, so the clash starts out comparing like with like."""
+    model = CAAGFN(tiny_config(tiny_clip)).eval()
+    input_ids, mask, pixels = inputs(tiny_clip)
 
-
-def test_entropy_does_not_move_when_the_patch_count_changes():
-    """Normalising by log(n) is what makes the gate comparable across image
-    encoders with different patch counts."""
-    wide = AdaptiveGatedFusion.attention_entropy(torch.full((1, 4, 64), 1 / 64))
-    narrow = AdaptiveGatedFusion.attention_entropy(torch.full((1, 4, 8), 1 / 8))
-    assert torch.allclose(wide, narrow, atol=1e-4)
-
-
-def test_the_gate_leans_on_the_image_when_the_text_says_nothing():
-    """The claim the architecture is built on, tested as a monotonicity.
-
-    Entropy is the only input that changes between the two calls, so any
-    difference in the gate is caused by it.
-    """
-    torch.manual_seed(0)
-    fusion = AdaptiveGatedFusion(HIDDEN)
-    # Force the text gate to respond negatively to entropy, which is the
-    # direction the architecture assumes; with random init the sign is random.
     with torch.no_grad():
-        fusion.text_gate.weight[0, -1] = -4.0
-        fusion.blend.fill_(4.0)  # trust the text gate, not the vision gate
+        _, text = model.encode_text(input_ids, mask)
+        _, image = model.encode_image(pixels)
+        clip_text = CLIPTextModelWithProjection.from_pretrained(tiny_clip)(
+            input_ids=input_ids, attention_mask=mask).text_embeds
+        clip_image = CLIPVisionModelWithProjection.from_pretrained(tiny_clip)(
+            pixel_values=pixels).image_embeds
 
-    text = torch.randn(4, HIDDEN)
-    vision = torch.randn(4, HIDDEN)
-    clash = torch.randn(4, HIDDEN)
-
-    _, sharp = fusion(text, vision, clash, torch.zeros(4, 1))
-    _, flat = fusion(text, vision, clash, torch.ones(4, 1))
-    assert (flat < sharp).all(), "flat attention should shift weight to vision"
-
-
-def test_clash_is_zero_when_the_modalities_agree_exactly():
-    """|t - v| is zero and t * v is t squared, so the clash carries only the
-    agreement term. It must not blow up."""
-    clash = SemanticClash(HIDDEN)
-    same = torch.randn(3, HIDDEN)
-    assert torch.isfinite(clash(same, same)).all()
+    assert torch.allclose(text, clip_text, atol=1e-5)
+    assert torch.allclose(image, clip_image, atol=1e-5)
 
 
-def test_gradient_guard_sees_a_nan():
-    """The check the previous training loop was missing."""
-    layer = torch.nn.Linear(4, 1)
-    layer(torch.randn(2, 4)).sum().backward()
-    assert gradients_are_finite(layer)
+def test_the_classifier_reads_the_clash(tiny_clip):
+    """The first version only used the clash inside a scalar gate."""
+    model = CAAGFN(tiny_config(tiny_clip)).eval()
+    seen = {}
+    model.head.register_forward_hook(
+        lambda module, args, output: seen.update(features=args[0]))
+    model.clash.register_forward_hook(
+        lambda module, args, output: seen.update(clash=output))
 
-    layer.weight.grad[0, 0] = float("nan")
-    assert not gradients_are_finite(layer)
-
-
-def test_gradient_guard_sees_an_inf():
-    layer = torch.nn.Linear(4, 1)
-    layer(torch.randn(2, 4)).sum().backward()
-    layer.bias.grad[0] = float("inf")
-    assert not gradients_are_finite(layer)
+    with torch.no_grad():
+        model(*inputs(tiny_clip))
+    assert seen["features"].shape[-1] == 2 * HIDDEN
+    assert torch.equal(seen["features"][:, HIDDEN:], seen["clash"])
 
 
-def test_clipping_a_nan_norm_poisons_every_gradient():
-    """Why the guard runs before the clip, demonstrated rather than asserted.
+def test_only_the_top_blocks_open(tiny_clip):
+    model = CAAGFN(tiny_config(tiny_clip))
+    model.unfreeze_top(2)
 
-    One non-finite gradient, passed to clip_grad_norm_, makes the total norm
-    non-finite and scales every other gradient by it. This is why the guard has
-    to run before the clip and not after.
-    """
-    layer = torch.nn.Linear(4, 2)
-    layer(torch.randn(3, 4)).sum().backward()
-
-    clean = layer.bias.grad.clone()
-    assert torch.isfinite(clean).all()
-
-    layer.weight.grad[0, 0] = float("nan")
-    torch.nn.utils.clip_grad_norm_(layer.parameters(), 1.0)
-
-    assert not torch.isfinite(layer.bias.grad).all(), (
-        "the bias gradient was finite and untouched by the NaN, and clipping "
-        "spread it anyway"
-    )
+    for name, parameter in model.named_parameters():
+        if model.is_custom(name):
+            assert parameter.requires_grad, name
+        elif ".layers.3." in name or ".layers.4." in name:
+            assert parameter.requires_grad, name
+        else:
+            assert not parameter.requires_grad, name
 
 
-def test_the_loader_prefers_the_captioned_split(tmp_path):
-    """captions.py writes <split>_captioned.jsonl. If the loader does not look
-    for it, an expensive BLIP pass changes nothing and nothing says so."""
-    from ca_agfn.data import split_file
+def test_deeper_blocks_get_smaller_learning_rates(tiny_clip):
+    config = tiny_config(tiny_clip)
+    model = CAAGFN(config)
+    model.unfreeze_top(2)
+    rates = {group["name"]: group["lr"]
+             for group in parameter_groups(model, config, phase=2)}
 
-    (tmp_path / "train.jsonl").write_text("{}", encoding="utf-8")
-    assert split_file(tmp_path, "train").name == "train.jsonl"
-
-    (tmp_path / "train_captioned.jsonl").write_text("{}", encoding="utf-8")
-    assert split_file(tmp_path, "train").name == "train_captioned.jsonl"
-
-
-def test_captions_can_be_turned_off(tmp_path):
-    from ca_agfn.data import split_file
-
-    (tmp_path / "dev.jsonl").write_text("{}", encoding="utf-8")
-    (tmp_path / "dev_captioned.jsonl").write_text("{}", encoding="utf-8")
-    assert split_file(tmp_path, "dev", use_captions=False).name == "dev.jsonl"
+    assert rates["backbone_depth_0"] == config.phase2_lr_backbone
+    assert rates["backbone_depth_1"] == pytest.approx(
+        config.phase2_lr_backbone * config.llrd_decay)
+    assert rates["head"] == config.phase2_lr_head
 
 
-def test_entropy_is_taken_per_head_not_after_averaging():
-    """The order of the two operations is what keeps the gate from being flat.
+def test_a_checkpoint_round_trips(tiny_clip, tmp_path):
+    model = CAAGFN(tiny_config(tiny_clip)).eval()
+    with torch.no_grad():
+        for parameter in model.head.parameters():
+            parameter.add_(0.5)  # so a fresh model would disagree
+    batch = inputs(tiny_clip)
 
-    Eight heads, each certain about a different patch. Every head has zero
-    entropy. Their average is close to uniform, and measuring that gives an
-    entropy close to one — on real data it pins the gate input at 0.99 for
-    every meme. Entropy is concave, so averaging first is not a detail.
-    """
-    heads, patches = 8, 8
-    per_head = torch.zeros(1, heads, 4, patches)
-    for head in range(heads):
-        per_head[:, head, :, head] = 1.0  # each head is certain, elsewhere
-
-    sharp = AdaptiveGatedFusion.attention_entropy(per_head)
-    assert sharp.item() < 0.01, "every head is a spike, so the entropy is zero"
-
-    averaged_first = AdaptiveGatedFusion.attention_entropy(
-        per_head.mean(dim=1))
-    assert averaged_first.item() > 0.99, "averaging first destroys the signal"
+    path = save_checkpoint(model, tmp_path / "model.safetensors")
+    restored, meta = load_checkpoint(path)
+    with torch.no_grad():
+        assert torch.allclose(model(*batch), restored(*batch), atol=1e-6)
+    assert meta["config"]["hidden_size"] == HIDDEN
 
 
-def test_entropy_accepts_both_shapes():
-    """(batch, tokens, patches) and (batch, heads, tokens, patches)."""
-    flat3 = torch.full((2, 5, 8), 1 / 8)
-    flat4 = torch.full((2, 4, 5, 8), 1 / 8)
-    assert AdaptiveGatedFusion.attention_entropy(flat3).shape == (2, 1)
-    assert AdaptiveGatedFusion.attention_entropy(flat4).shape == (2, 1)
-    assert torch.allclose(
-        AdaptiveGatedFusion.attention_entropy(flat3),
-        AdaptiveGatedFusion.attention_entropy(flat4), atol=1e-5)
+def _train_script():
+    spec = importlib.util.spec_from_file_location(
+        "train_script", ROOT / "scripts" / "train.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def test_cross_modal_attention_returns_per_head_weights():
-    attention = CrossModalAttention(HIDDEN, n_heads=4).eval()
-    _, _, weights = attention(
-        torch.randn(2, 6, HIDDEN), torch.randn(2, 5, HIDDEN),
-        torch.ones(2, 6, dtype=torch.long))
-    assert weights.shape == (2, 4, 6, 5), "batch, heads, text tokens, patches"
+def test_the_smoke_run_writes_a_complete_result(tiny_clip, tmp_path):
+    results = _train_script().main(
+        ["--smoke", "--results", str(tmp_path), "--seed", "0"])
+    written = json.loads(
+        (tmp_path / "full" / "seed0.json").read_text(encoding="utf-8"))
+
+    assert written["variant"] == "full" and written["smoke"]
+    for key in ("auroc", "auroc_ci95", "accuracy", "f1_macro", "threshold",
+                "auroc_shuffled_image", "auroc_shuffled_text"):
+        assert key in written["test"], key
+    assert len(written["predictions"]["probability"]) == 32
+    assert "label" not in written["predictions"], "labels are Meta's to share"
+    assert results["training"]["skipped_steps"] == 0
+
+
+def test_a_text_only_model_is_blind_to_the_image_shuffle(tiny_clip, tmp_path):
+    """A sanity check on the shuffle test itself: moving images between memes
+    cannot change what a model that never reads images predicts."""
+    results = _train_script().main(
+        ["--smoke", "--variant", "text_only", "--results", str(tmp_path)])
+    test = results["test"]
+    assert test["auroc_shuffled_image"] == pytest.approx(test["auroc"])

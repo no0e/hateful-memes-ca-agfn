@@ -9,6 +9,7 @@ again without losing anything. Seeds are the outer loop: if it is cut short,
 every variant has the same number of seeds done.
 """
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -52,8 +53,10 @@ def main():
             log = logs / f"{variant}_seed{seed}.log"
             print(f"{variant} seed {seed}: running, log in {log}", flush=True)
             started = time.time()
+            # Unbuffered, or the log shows nothing until the run is over.
+            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
             with log.open("w", encoding="utf-8") as handle:
-                code = subprocess.run(command, stdout=handle,
+                code = subprocess.run(command, stdout=handle, env=env,
                                       stderr=subprocess.STDOUT).returncode
             minutes = (time.time() - started) / 60
             if code:
