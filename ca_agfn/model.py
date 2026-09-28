@@ -250,6 +250,9 @@ class CAAGFN(nn.Module):
         width = hidden
         if config.fusion == "concat":
             width = 2 * hidden
+        elif config.fusion == "concat_clash":
+            self.clash = SemanticClash(hidden)
+            width = 3 * hidden
         elif config.fusion == "gated":
             self.cross_attention = CrossModalAttention(
                 hidden, config.attention_heads)
@@ -370,6 +373,8 @@ class CAAGFN(nn.Module):
             features = image
         elif config.fusion == "concat":
             features = torch.cat([text, image], dim=-1)
+        elif config.fusion == "concat_clash":
+            features = torch.cat([text, image, self.clash(text, image)], dim=-1)
         else:
             text_seq, image_seq, weights = self.cross_attention(
                 text_tokens, image_tokens, attention_mask)

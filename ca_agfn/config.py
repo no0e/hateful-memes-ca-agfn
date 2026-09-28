@@ -27,10 +27,12 @@ class Config:
     attention_heads: int = 8
 
     # What the fusion is made of. Each ablation switches one of these.
-    #   gated   cross-modal attention, then the entropy-conditioned gate
-    #   concat  the two pooled vectors side by side, nothing else
-    #   text    the text encoder alone
-    #   image   the image encoder alone
+    #   gated         cross-modal attention, then the entropy-conditioned gate
+    #   concat        the two pooled vectors side by side, nothing else
+    #   concat_clash  the two pooled vectors and the clash, nothing else
+    #   text          the text encoder alone
+    #   image         the image encoder alone
+    # `use_clash` and `use_entropy` only change the gated fusion.
     fusion: str = "gated"
     use_clash: bool = True
     use_entropy: bool = True
@@ -74,7 +76,8 @@ class Config:
     def __post_init__(self):
         self.data_dir = Path(self.data_dir)
         self.checkpoint_dir = Path(self.checkpoint_dir)
-        if self.fusion not in ("gated", "concat", "text", "image"):
+        if self.fusion not in ("gated", "concat", "concat_clash", "text",
+                               "image"):
             raise ValueError(f"Unknown fusion {self.fusion!r}.")
 
     @property
@@ -97,6 +100,9 @@ VARIANTS = {
     "no_entropy": {"use_entropy": False},
     "no_clash": {"use_clash": False},
     "concat": {"fusion": "concat"},
+    # The direct test of the premise: does an explicit gap add anything to a
+    # classifier that already sees both vectors?
+    "concat_clash": {"fusion": "concat_clash"},
     # Captions off, or a "text only" model would see the image through BLIP.
     "text_only": {"fusion": "text", "use_captions": False},
     "image_only": {"fusion": "image"},

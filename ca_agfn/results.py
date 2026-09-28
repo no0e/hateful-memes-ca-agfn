@@ -11,6 +11,7 @@ LABELS = {
     "no_captions": "without BLIP captions",
     "xlmr": "XLM-R text encoder (the v1 backbone)",
     "concat": "Concatenated CLIP vectors, no fusion",
+    "concat_clash": "Concatenated CLIP vectors and the clash",
     "text_only": "Text only",
     "image_only": "Image only",
 }

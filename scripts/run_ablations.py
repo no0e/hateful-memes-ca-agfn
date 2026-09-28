@@ -18,7 +18,7 @@ from pathlib import Path
 from ca_agfn.config import ROOT, VARIANTS
 
 ORDER = ["full", "text_only", "image_only", "concat", "no_clash",
-         "no_entropy", "no_captions", "xlmr"]
+         "no_entropy", "no_captions", "xlmr", "concat_clash"]
 
 
 def main():

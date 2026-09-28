@@ -46,6 +46,7 @@ SHORT = {
     "no_captions": "− BLIP captions",
     "xlmr": "XLM-R text encoder (v1)",
     "concat": "Concat, no fusion",
+    "concat_clash": "Concat + clash",
     "text_only": "Text only",
     "image_only": "Image only",
 }
