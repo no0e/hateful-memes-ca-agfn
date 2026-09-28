@@ -17,6 +17,9 @@ reports, over real text tokens only:
 
   the entropy, per head, as the gate sees it
 
+Each is measured twice: on the trained model, and on the same architecture
+freshly initialised, to tell what training did from what it started with.
+
 Writes results/attention_diagnostics.json.
 """
 import argparse
@@ -32,7 +35,8 @@ from transformers.utils import logging as hf_logging
 from ca_agfn.checkpoint import load_checkpoint
 from ca_agfn.config import ROOT
 from ca_agfn.data import build_loaders
-from ca_agfn.model import attention_entropy
+from ca_agfn.model import CAAGFN, attention_entropy
+from ca_agfn.training import seed_everything
 
 
 def mean_pairwise_cosine(vectors):
