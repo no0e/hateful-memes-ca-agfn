@@ -123,10 +123,17 @@ def panel_shuffle(ax, summary):
         values = [summary[variant][key]["mean"] for key, _, _ in conditions]
         ax.hlines(row, min(values), max(values), color=BASELINE, linewidth=1.2,
                   zorder=2)
-        for (_, name, colour), value in zip(conditions, values, strict=True):
-            ax.scatter([value], [row], s=64, color=colour, zorder=4,
-                       edgecolor=SURFACE, linewidth=2,
-                       label=name if row == 0 else None)
+        for (key, name, colour), value in zip(conditions, values, strict=True):
+            label = name if row == 0 else None
+            if key == "test_auroc":
+                # A ring on top, so a shuffle that changes nothing shows as a
+                # dot inside the ring instead of hiding the intact score.
+                ax.scatter([value], [row], s=130, facecolors="none",
+                           edgecolors=colour, linewidth=2, zorder=5,
+                           label=label)
+            else:
+                ax.scatter([value], [row], s=64, color=colour, zorder=4,
+                           edgecolor=SURFACE, linewidth=2, label=label)
 
     reference(ax, 0.5, "chance")
     ax.set_yticks(range(len(order)))
