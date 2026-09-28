@@ -53,11 +53,11 @@ SHORT = {
 
 
 def reference(ax, x, name, colour=BASELINE):
-    """A dashed vertical reference, labelled along itself at the bottom."""
+    """A dashed vertical reference, labelled along itself at the top."""
     ax.axvline(x, color=colour, linewidth=1, linestyle=(0, (3, 3)), zorder=1)
-    ax.annotate(name, (x, 0), xycoords=("data", "axes fraction"),
-                xytext=(3, 4), textcoords="offset points", rotation=90,
-                fontsize=7.5, color=INK_MUTED, ha="left", va="bottom",
+    ax.annotate(name, (x, 1), xycoords=("data", "axes fraction"),
+                xytext=(3, -4), textcoords="offset points", rotation=90,
+                fontsize=7.5, color=INK_MUTED, ha="left", va="top",
                 bbox={"boxstyle": "square,pad=0.1", "fc": SURFACE, "ec": "none"},
                 zorder=5)
 
@@ -114,8 +114,8 @@ def panel_ablations(ax, runs, summary):
 
 
 def panel_shuffle(ax, summary):
-    order = [v for v in ("image_only", "text_only", "concat", "full")
-             if v in summary]
+    order = [v for v in ("image_only", "text_only", "xlmr", "concat",
+                         "concat_clash", "full") if v in summary]
     conditions = (("test_auroc", "Intact", SERIES_1),
                   ("auroc_shuffled_image", "Images shuffled", SERIES_2),
                   ("auroc_shuffled_text", "Texts shuffled", SERIES_3))
