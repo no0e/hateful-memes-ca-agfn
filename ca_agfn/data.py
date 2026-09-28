@@ -216,10 +216,12 @@ def build_loaders(config, tokenizer, image_processor, pin_memory=False):
             print(f"  warning: {missing} image files are missing and will be "
                   "read as blank")
 
-    # Workers exist to decode images. A text-only model has nothing for them
-    # to do, and eight of them forked to hand over pre-tokenised tensors once
-    # deadlocked on the first batch; in-process it takes a third of a second
-    # per epoch. The timeout turns any other hang into an error.
+    # Workers exist to decode images, so a text-only model loads in-process: a
+    # third of a second per epoch. Workers are spawned, not forked. By the
+    # time a loader starts, this process holds CUDA, tokenizer and progress-bar
+    # threads, and forking it deadlocked two of the first four runs on a T4,
+    # at random, before their first epoch finished. The timeout turns any
+    # other hang into an error instead of a stalled queue of runs.
     workers = config.num_workers if config.uses_image else 0
     common = {
         "batch_size": config.batch_size,
@@ -227,6 +229,7 @@ def build_loaders(config, tokenizer, image_processor, pin_memory=False):
         "pin_memory": pin_memory,
         "persistent_workers": workers > 0,
         "timeout": 600 if workers else 0,
+        "multiprocessing_context": "spawn" if workers else None,
     }
     loaders = {
         name: DataLoader(dataset, shuffle=name == "train",

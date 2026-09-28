@@ -35,35 +35,41 @@ def main():
 
     logs = Path(args.logs)
     logs.mkdir(parents=True, exist_ok=True)
-    failures = []
 
-    for seed in args.seeds:
-        for variant in args.variants:
-            out = Path(args.results) / variant / f"seed{seed}.json"
-            if out.exists():
-                print(f"{variant} seed {seed}: done already")
-                continue
+    def run(variant, seed):
+        """Train one variant with one seed. True if it succeeded."""
+        out = Path(args.results) / variant / f"seed{seed}.json"
+        if out.exists():
+            print(f"{variant} seed {seed}: done already")
+            return True
 
-            command = [sys.executable, str(ROOT / "scripts" / "train.py"),
-                       "--variant", variant, "--seed", str(seed),
-                       "--results", args.results, *passthrough]
-            if args.checkpoint and variant == "full" and seed == args.seeds[0]:
-                command += ["--checkpoint", args.checkpoint]
+        command = [sys.executable, str(ROOT / "scripts" / "train.py"),
+                   "--variant", variant, "--seed", str(seed),
+                   "--results", args.results, *passthrough]
+        if args.checkpoint and variant == "full" and seed == args.seeds[0]:
+            command += ["--checkpoint", args.checkpoint]
 
-            log = logs / f"{variant}_seed{seed}.log"
-            print(f"{variant} seed {seed}: running, log in {log}", flush=True)
-            started = time.time()
-            # Unbuffered, or the log shows nothing until the run is over.
-            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-            with log.open("w", encoding="utf-8") as handle:
-                code = subprocess.run(command, stdout=handle, env=env,
-                                      stderr=subprocess.STDOUT).returncode
-            minutes = (time.time() - started) / 60
-            if code:
-                failures.append((variant, seed))
-                print(f"  failed after {minutes:.0f} min, exit {code}")
-            else:
-                print(f"  done in {minutes:.0f} min", flush=True)
+        log = logs / f"{variant}_seed{seed}.log"
+        print(f"{variant} seed {seed}: running, log in {log}", flush=True)
+        started = time.time()
+        # Unbuffered, or the log shows nothing until the run is over.
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        with log.open("w", encoding="utf-8") as handle:
+            code = subprocess.run(command, stdout=handle, env=env,
+                                  stderr=subprocess.STDOUT).returncode
+        minutes = (time.time() - started) / 60
+        if code:
+            print(f"  failed after {minutes:.0f} min, exit {code}", flush=True)
+            return False
+        print(f"  done in {minutes:.0f} min", flush=True)
+        return True
+
+    failures = [(variant, seed) for seed in args.seeds
+                for variant in args.variants if not run(variant, seed)]
+    # One retry each, at the end, so a transient failure costs one run and
+    # not the rest of the queue.
+    failures = [(variant, seed) for variant, seed in failures
+                if not run(variant, seed)]
 
     if failures:
         print(f"\n{len(failures)} runs failed: {failures}")
