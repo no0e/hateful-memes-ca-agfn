@@ -128,23 +128,27 @@ def main():
     loaders, _, _ = build_loaders(
         config, AutoTokenizer.from_pretrained(config.text_model),
         CLIPImageProcessor.from_pretrained(config.vision_model))
-    stats = measure(model, loaders["test"], device, args.batches)
+    seed_everything(config.seed)
+    untrained = CAAGFN(config).to(device).eval()
 
-    report = {"checkpoint": Path(args.checkpoint).name,
-              "memes": int(len(stats["entropy"])),
-              **{key: describe(values) for key, values in stats.items()}}
+    report = {"checkpoint": Path(args.checkpoint).name}
+    for name, candidate in (("trained", model), ("untrained", untrained)):
+        stats = measure(candidate, loaders["test"], device, args.batches)
+        report["memes"] = int(len(stats["entropy"]))
+        report[name] = {key: describe(values) for key, values in stats.items()}
     Path(args.out).write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     print(f"{report['memes']} test memes, real text tokens only\n")
+    print(f"  {'':<52} {'trained':>17}   {'untrained':>17}")
     for key, label in (
             ("logit_std", "spread of attention logits across image positions"),
             ("key_cosine", "cosine between keys of different patches"),
             ("patch_cosine", "cosine between CLIP's own patch tokens"),
             ("entropy", "entropy the gate reads"),
             ("entropy_per_head_min", "entropy of the sharpest head")):
-        d = report[key]
-        print(f"  {label:<52} {d['mean']:.4f} ± {d['std']:.4f}  "
-              f"[{d['min']:.4f}, {d['max']:.4f}]")
+        cells = [f"{report[n][key]['mean']:.4f} ± {report[n][key]['std']:.4f}"
+                 for n in ("trained", "untrained")]
+        print(f"  {label:<52} {cells[0]:>17}   {cells[1]:>17}")
     print(f"\nWrote {args.out}")
 
 
