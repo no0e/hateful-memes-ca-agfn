@@ -108,7 +108,7 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--checkpoint", default=str(
-        ROOT / "checkpoints" / "full_seed0.safetensors"))
+        ROOT / "weights" / "ca_agfn_v2.safetensors"))
     parser.add_argument("--data", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--batches", type=int, default=16)

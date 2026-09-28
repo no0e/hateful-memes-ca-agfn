@@ -1,7 +1,7 @@
 """Run the trained model on a constructed meme, and draw the result.
 
-    python scripts/example.py --checkpoint checkpoints/full_seed0.safetensors
-    python scripts/example.py --scores docs/example/scores.json   # no GPU
+    python scripts/example.py                                    # published weights
+    python scripts/example.py --scores docs/example/scores.json  # no model at all
 
 The same line of text over two different images. On the calm mountain it reads
 literally; over the same mountain erupting it reads as its opposite. That is
@@ -111,7 +111,7 @@ def score(model, tokenizer, processor, image, text, device):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default=str(
-        ROOT / "checkpoints" / "full_seed0.safetensors"))
+        ROOT / "weights" / "ca_agfn_v2.safetensors"))
     parser.add_argument("--device", default=None)
     parser.add_argument("--text", default=CAPTION)
     parser.add_argument("--scores", default=None,

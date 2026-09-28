@@ -13,3 +13,6 @@ logs/
 *.safetensors
 nohup.out
 *.log
+
+# The published weights are tracked with Git LFS.
+!weights/*.safetensors

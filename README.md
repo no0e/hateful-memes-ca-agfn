@@ -278,6 +278,28 @@ The tests and the smoke run download a tiny random CLIP of a few megabytes and
 nothing else. The smoke run proves the pipeline runs end to end; it proves
 nothing about the model.
 
+## Trained weights
+
+The full model from seed 0, test AUROC 0.712, is in [`weights/`](weights),
+stored with Git LFS. `ca_agfn_v2.safetensors` holds the 24.3 million parameters
+that training changed, the new modules and the top two blocks of each CLIP
+encoder; `ca_agfn_v2.json` holds its config. The rest of CLIP comes from the
+Hugging Face Hub as usual.
+
+```bash
+git lfs install                    # once, before cloning; or git lfs pull after
+python scripts/example.py          # runs it on the worked example, on a CPU
+```
+
+```python
+from ca_agfn.checkpoint import load_checkpoint
+
+model, meta = load_checkpoint("weights/ca_agfn_v2.safetensors")
+```
+
+The weights come from training on the Hateful Memes dataset and are shared for
+research use, in line with its licence.
+
 ## Reproducing the results
 
 ```bash
@@ -289,9 +311,11 @@ python scripts/run_ablations.py --workers 8 \
     --checkpoint checkpoints/full_seed0.safetensors
 python scripts/aggregate.py        # results/summary.md
 python scripts/figure.py           # docs/results.png, from the result files
-python scripts/attention_diagnostics.py
-python scripts/example.py
+python scripts/attention_diagnostics.py --checkpoint checkpoints/full_seed0.safetensors
+python scripts/example.py --checkpoint checkpoints/full_seed0.safetensors
 ```
+
+Without `--checkpoint`, the last two use the published weights.
 
 `run_ablations.py` trains nine variants with three seeds each, one process per
 run, and skips any run whose result file exists, so it can be stopped and
@@ -371,6 +395,7 @@ ca_agfn/
 scripts/          train, run_ablations, aggregate, figure, diagram,
                   attention_diagnostics, example, captions, fetch_data
 results/          one JSON per run, the summary table, the diagnostics
+weights/          the trained full model, seed 0, in Git LFS
 tests/            45 tests, CPU only
 ```
 
