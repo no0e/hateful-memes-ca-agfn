@@ -74,6 +74,10 @@ python scripts/run_ablations.py    # 9 variants x 3 seeds, about 5 h on a T4
 python scripts/aggregate.py        # results/summary.md
 ```
 
+Add `--wandb` to `train.py` or `run_ablations.py` to log every run to Weights & Biases (project `ca-agfn`): the config, one point per epoch across both phases, and the test scores as the run summary, so the 27 runs compare side by side. `WANDB_MODE=offline` keeps them local until `wandb sync`. The JSON under `results/` stays the record either way.
+
+`docker build -t ca-agfn . && docker run --rm ca-agfn` runs the smoke pipeline in a CPU container. CI runs ruff, the tests on Python 3.10 to 3.13, the smoke run tracked offline in W&B, and the image build on every push.
+
 ## Dataset
 
 Meta's Hateful Memes: Kiela et al., *The Hateful Memes Challenge*, NeurIPS 2020,
