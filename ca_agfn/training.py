@@ -140,8 +140,10 @@ def _batch(batch, device):
 
 
 def train_phase(model, train_loader, val_loader, config, phase, pos_weight,
-                device, history=None, verbose=True):
+                device, history=None, verbose=True, tracker=None):
     """One phase. Returns the history, the best weights and their val AUROC.
+
+    `tracker` (a `ca_agfn.tracking.Tracker`) receives one point per epoch.
 
     The best weights are the tuned parameters only, kept in memory: a full
     state dict per epoch would mostly be copies of frozen CLIP.
@@ -233,6 +235,11 @@ def train_phase(model, train_loader, val_loader, config, phase, pos_weight,
         history["val_auroc"].append(val_auroc)
         history["skipped_steps"].append(skipped)
         history["seconds"].append(round(time.time() - started, 1))
+        if tracker is not None:
+            tracker.epoch(phase, epoch + 1, loss=running / counted,
+                          val_auroc=val_auroc, skipped_steps=skipped,
+                          seconds=history["seconds"][-1],
+                          learning_rate=scheduler.get_last_lr()[0])
 
         if verbose:
             note = f"  skipped {skipped}" if skipped else ""
@@ -250,12 +257,13 @@ def train_phase(model, train_loader, val_loader, config, phase, pos_weight,
     return history, best_state, best_auroc
 
 
-def fit(model, loaders, config, pos_weight, device, verbose=True):
+def fit(model, loaders, config, pos_weight, device, verbose=True,
+        tracker=None):
     """Both phases. Leaves the best weights of either phase in `model`."""
     model.freeze_backbones()
     history, best_state, phase1 = train_phase(
         model, loaders["train"], loaders["val"], config, 1, pos_weight,
-        device, verbose=verbose)
+        device, verbose=verbose, tracker=tracker)
     # Phase two starts from the best phase-one weights, not the last ones.
     model.load_tuned_state_dict(best_state)
     summary = {"phase1_val_auroc": phase1, "phase2_val_auroc": None,
@@ -265,7 +273,7 @@ def fit(model, loaders, config, pos_weight, device, verbose=True):
         model.unfreeze_top(config.unfreeze_top)
         history, state, phase2 = train_phase(
             model, loaders["train"], loaders["val"], config, 2, pos_weight,
-            device, history=history, verbose=verbose)
+            device, history=history, verbose=verbose, tracker=tracker)
         summary["phase2_val_auroc"] = phase2
         if state is not None and phase2 > phase1:
             best_state, summary["best_phase"] = state, 2

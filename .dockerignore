@@ -1,0 +1,10 @@
+.git
+data/
+logs/
+results/
+docs/
+tests/
+wandb/
+**/__pycache__
+.pytest_cache
+.ruff_cache

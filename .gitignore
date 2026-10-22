@@ -16,3 +16,6 @@ nohup.out
 
 # The published weights are tracked with Git LFS.
 !weights/*.safetensors
+
+# Local W&B runs (offline mode or before sync).
+wandb/

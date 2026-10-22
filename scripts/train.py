@@ -32,6 +32,7 @@ from ca_agfn.evaluation import report
 from ca_agfn.metrics import finite_or_none
 from ca_agfn.model import CAAGFN
 from ca_agfn.synthetic import write_fake_dataset, write_tiny_text_model
+from ca_agfn.tracking import Tracker
 from ca_agfn.training import fit, seed_everything
 
 TINY_CLIP = "hf-internal-testing/tiny-random-CLIPModel"
@@ -75,6 +76,11 @@ def parse(argv=None):
                         help="Also save the tuned weights here (.safetensors).")
     parser.add_argument("--smoke", action="store_true",
                         help="Fake data and a tiny model, one epoch per phase.")
+    parser.add_argument("--wandb", action="store_true",
+                        help="Log the run to Weights & Biases.")
+    parser.add_argument("--wandb-project", default="ca-agfn")
+    parser.add_argument("--wandb-group", default=None,
+                        help="Group runs, e.g. one group per ablation sweep.")
     return parser.parse_args(argv)
 
 
@@ -123,11 +129,22 @@ def main(argv=None):
           f"pos_weight {pos_weight.item():.3f}  "
           f"captions {'yes' if used_captions else 'no'}")
 
+    tracker = Tracker(
+        enabled=args.wandb, project=args.wandb_project, group=args.wandb_group,
+        name=f"{args.variant}-seed{config.seed}" + ("-smoke" if args.smoke else ""),
+        config={**config.to_dict(), "variant": args.variant,
+                "device": device_name, "commit": git_commit()},
+        tags=[args.variant] + (["smoke"] if args.smoke else []))
+
     started = time.time()
     model = CAAGFN(config).to(device)
-    history, summary = fit(model, loaders, config, pos_weight, device)
+    history, summary = fit(model, loaders, config, pos_weight, device,
+                           tracker=tracker)
     scores = report(model, loaders, device, seed=config.seed)
     minutes = (time.time() - started) / 60
+    tracker.summary(summary, prefix="train/")
+    tracker.summary(scores["test"], prefix="test/")
+    tracker.summary({"minutes": round(minutes, 1)})
 
     test = scores["test"]
     low, high = test["auroc_ci95"]
@@ -164,6 +181,7 @@ def main(argv=None):
             "variant": args.variant, "test_auroc": test["auroc"]})
         print(f"Wrote {path}")
 
+    tracker.finish()
     if scratch is not None:
         scratch.cleanup()
     return results

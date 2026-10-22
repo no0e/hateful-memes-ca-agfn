@@ -23,7 +23,8 @@ dependencies = [
 [project.optional-dependencies]
 figures = ["matplotlib>=3.7"]
 data = ["kagglehub>=0.3"]
-dev = ["pytest>=7.4", "ruff>=0.5", "matplotlib>=3.7"]
+dev = ["pytest>=7.4", "ruff>=0.5", "matplotlib>=3.7", "wandb>=0.17"]
+track = ["wandb>=0.17"]
 
 [tool.setuptools]
 packages = ["ca_agfn"]
