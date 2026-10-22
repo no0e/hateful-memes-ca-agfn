@@ -31,5 +31,6 @@ def test_an_enabled_tracker_logs_epochs_in_global_order(tmp_path, monkeypatch):
     assert [point["global_epoch"] for point in logged] == [1, 2, 3]
     assert [point["phase"] for point in logged] == [1, 1, 2]
     assert tracker.run.summary["test/auroc"] == 0.70
-    assert "test/ci95" not in tracker.run.summary  # only scalars
+    with pytest.raises(KeyError):  # only scalars reach the summary
+        tracker.run.summary["test/ci95"]
     tracker.finish()
